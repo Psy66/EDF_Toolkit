@@ -2,13 +2,17 @@
 import os
 import tkinter as tk
 import logging
+from sqlalchemy import create_engine, text
 from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext
+
+from sqlalchemy.orm import sessionmaker
+
 from config.settings import settings
 from core.edf_processor import EDFProcessor
 from core.edf_segmentor import EDFSegmentor
 from tabulate import tabulate
-from core.db_manager import DBManager
+from core.db_manager import DBManager, logger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -76,6 +80,7 @@ class EDFApp:
         db_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
 
         db_buttons = [
+            ("Load DB", self.load_database, "Load SQLite database"),
             ("Create DB", self.create_database, "Create SQLite database structure"),
             ("Fill Segments", self.fill_segments_db, "Fill database with segments data"),
             ("Edit DB", self.edit_database, "Edit database tables manually"),
@@ -97,6 +102,63 @@ class EDFApp:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
+
+    def load_database(self):
+        """Load existing database and show basic statistics."""
+        if not self.directory:
+            self.directory = filedialog.askdirectory(title="Select working directory")
+            if not self.directory:
+                return
+
+        db_path = os.path.join(self.directory, "DB", "eeg_database.db")
+        if not os.path.exists(db_path):
+            messagebox.showwarning("Warning", f"Database not found at: {db_path}")
+            return
+
+        try:
+            self.db_manager = DBManager(self.directory)
+            self.db_manager.engine = create_engine(f'sqlite:///{db_path}')
+            self.db_manager.Session = sessionmaker(bind=self.db_manager.engine)
+
+            # Получаем статистику по базе
+            stats = self._get_db_statistics()
+
+            # Выводим статистику
+            self.text_output.delete(1.0, tk.END)
+            self.text_output.insert(tk.END, f"Database loaded from: {db_path}\n\n")
+            self.text_output.insert(tk.END, "Database Statistics:\n")
+            self.text_output.insert(tk.END, "-" * 50 + "\n")
+
+            for table, count in stats.items():
+                self.text_output.insert(tk.END, f"{table:15}: {count} records\n")
+
+            # Активируем кнопки работы с БД
+            for i in range(3):
+                getattr(self, f"db_button_{i}").config(state=tk.NORMAL)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load database: {str(e)}")
+            self.text_output.insert(tk.END, f"Error loading database: {str(e)}\n")
+
+    def _get_db_statistics(self):
+        """Get basic statistics about database tables."""
+        if not self.db_manager or not self.db_manager.engine:
+            return {}
+
+        stats = {}
+        tables = self.db_manager.get_tables()
+
+        session = self.db_manager.Session()
+        try:
+            for table in tables:
+                count = session.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+                stats[table] = count
+        except Exception as e:
+            logger.error(f"Error getting database statistics: {str(e)}")
+        finally:
+            session.close()
+
+        return stats
 
     def create_database(self):
         """Create SQLite database structure."""
@@ -366,8 +428,15 @@ class EDFApp:
         if self.directory:
             self.text_output.insert(tk.END, f"Selected directory: {self.directory}\n")
             self.processor = EDFProcessor(self.directory)
+
+            # Пытаемся автоматически загрузить БД, если она существует
+            db_path = os.path.join(self.directory, "DB", "eeg_database.db")
+            if os.path.exists(db_path):
+                self.load_database()
+
+            # Активируем остальные кнопки
             for btn in self.button_frame.winfo_children():
-                if isinstance(btn, tk.Button) and btn["text"] != "Open Folder":
+                if isinstance(btn, tk.Button) and btn["text"] not in ["Open Folder", "Load DB"]:
                     btn.config(state=tk.NORMAL)
 
     def load_edf_file(self):

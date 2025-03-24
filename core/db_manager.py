@@ -1,11 +1,10 @@
 # core/db_manager.py
 import os
 import logging
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, Enum
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, Text, Enum, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.schema import UniqueConstraint, ForeignKey
-from sqlalchemy import inspect
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -139,10 +138,12 @@ class DBManager:
 
 			added_segments = []
 			for seg_name, seg_data in segments_data.items():
-				# Save segment to file
-				seg_filename = f"{seg_name}_{seg_data['start_time']:.1f}-{seg_data['end_time']:.1f}.h5"
+				# Generate filename according to MNE conventions
+				seg_filename = f"seg_{seg_name.lower()}_{seg_data['start_time']:.1f}-{seg_data['end_time']:.1f}_eeg.fif"
 				seg_filepath = os.path.join(segments_dir, seg_filename)
-				seg_data['data'].save(seg_filepath, overwrite=True)
+
+				# Save in FIF format with proper suffix
+				seg_data['data'].save(seg_filepath, overwrite=True, fmt='single')
 
 				# Create database record
 				segment = Segment(
@@ -178,7 +179,8 @@ class DBManager:
 		"""Get all data from specified table."""
 		session = self.Session()
 		try:
-			result = session.execute(f"SELECT * FROM {table_name}")
+			# Явно указываем, что это текстовый SQL-запрос
+			result = session.execute(text(f"SELECT * FROM {table_name}"))
 			columns = result.keys()
 			data = result.fetchall()
 			return columns, data
@@ -192,7 +194,8 @@ class DBManager:
 		"""Execute raw SQL query."""
 		session = self.Session()
 		try:
-			result = session.execute(query)
+			# Явно указываем, что это текстовый SQL-запрос
+			result = session.execute(text(query))
 			if query.lower().strip().startswith("select"):
 				return True, result.keys(), result.fetchall()
 			else:
