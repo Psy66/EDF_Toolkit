@@ -30,7 +30,8 @@ class EDFProcessor:
             raise FileNotFoundError(f"Directory {self.directory} does not exist.")
         return True
 
-    def get_edf_metadata(self, file_path, detailed=False):
+    @staticmethod
+    def get_edf_metadata(file_path, detailed=False):
         """ Extract metadata from an EDF file. """
         try:
             raw = read_raw_edf(file_path, preload=False)

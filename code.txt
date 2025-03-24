@@ -1,0 +1,1022 @@
+# config/settings.py
+class Settings:
+    """Класс для хранения настроек приложения."""
+    TABLE_FORMAT = "pretty"
+    MIN_SEGMENT_DURATION = 5.0
+
+settings = Settings()
+
+# core/edf_processor.py
+import os
+import hashlib
+import random
+import csv
+from collections import defaultdict
+from datetime import timedelta
+from dateutil.parser import parse
+from tqdm import tqdm
+from mne.io import read_raw_edf
+from mne import find_events
+from pandas import DataFrame
+import logging
+from transliterate import translit
+from core.edf_visualizer import EDFVisualizer
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+class EDFProcessor:
+    def __init__(self, directory):
+        self.directory = directory
+        self.output_dir = os.path.join(self.directory, "output")
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.visualizer = EDFVisualizer(self.output_dir)
+
+    def check_directory(self):
+        """Check if the directory exists."""
+        if not os.path.exists(self.directory):
+            raise FileNotFoundError(f"Directory {self.directory} does not exist.")
+        return True
+
+    def get_edf_metadata(self, file_path, detailed=False):
+        """ Extract metadata from an EDF file. """
+        try:
+            raw = read_raw_edf(file_path, preload=False)
+            info = raw.info
+            subject_info = info.get('subject_info', {})
+
+            # Basic metadata
+            metadata = {
+                'file_name': os.path.basename(file_path),
+                'subject_info': subject_info,
+                'duration': raw.times[-1],
+                'channels': info['ch_names'],
+                'sfreq': info['sfreq'],
+                'meas_date': info.get('meas_date', None)
+            }
+
+            # Additional details if requested
+            if detailed:
+                metadata['events'] = find_events(raw) if 'stim' in info['ch_names'] else None
+
+            return metadata
+        except Exception as e:
+            logging.error(f"Error reading file {file_path}: {e}")
+            return None
+
+    @staticmethod
+    def format_filename(filename):
+        """Format the filename: remove extra underscores and capitalize first and middle names."""
+        filename = filename.strip('_')
+        parts = filename.split('_')
+        formatted_parts = [part.capitalize() if part.isalpha() else part for part in parts]
+        return '_'.join(formatted_parts)
+
+    def rename_edf_files(self):
+        """Rename EDF files in the directory."""
+        edf_files = [f for f in os.listdir(self.directory) if f.endswith('.edf')]
+        renamed_count = 0
+
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self.get_edf_metadata, os.path.join(self.directory, file)): file for file in
+                       edf_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Renaming files", unit="file"):
+                file = futures[future]
+                try:
+                    metadata = future.result()
+                    if metadata:
+                        subject_info = metadata['subject_info']
+                        first_name = subject_info.get('first_name', '').strip().capitalize()
+                        middle_name = subject_info.get('middle_name', '').strip().capitalize()
+                        last_name = subject_info.get('last_name', '').strip().capitalize()
+                        patient_name = f"{first_name}_{middle_name}_{last_name}".strip()
+                        if not patient_name:
+                            patient_name = 'Unknown'
+
+                        recording_date = metadata.get('meas_date', 'Unknown_Date')
+                        if recording_date:
+                            recording_date = recording_date.strftime('%Y-%m-%d_%H-%M-%S')
+
+                        formatted_patient_name = self.format_filename(patient_name)
+                        new_name = f"{formatted_patient_name}_{recording_date}.edf"
+                        new_file_path = os.path.join(self.directory, new_name)
+
+                        counter = 1
+                        while os.path.exists(new_file_path):
+                            new_name = f"{formatted_patient_name}_{recording_date}_{counter}.edf"
+                            new_file_path = os.path.join(self.directory, new_name)
+                            counter += 1
+
+                        os.rename(os.path.join(self.directory, file), new_file_path)
+                        renamed_count += 1
+                    else:
+                        logging.warning(f"Failed to extract metadata for file {file}")
+                except Exception as e:
+                    logging.error(f"Error renaming file {file}: {e}")
+
+        return renamed_count
+
+    def analyze_directory(self):
+        """Analyze all EDF files in the specified directory."""
+        metadata_list = []
+        files = [os.path.join(self.directory, f) for f in os.listdir(self.directory) if f.endswith('.edf')]
+
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(self.get_edf_metadata, file) for file in files]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Analyzing files", unit="file"):
+                try:
+                    metadata = future.result()
+                    if metadata:
+                        metadata_list.append(metadata)
+                except Exception as e:
+                    logging.error(f"Error analyzing file: {e}")
+
+        return metadata_list
+
+    @staticmethod
+    def is_edf_corrupted(file_path):
+        """Check if an EDF file is corrupted."""
+        try:
+            raw = read_raw_edf(file_path, verbose=False)
+            return False
+        except Exception as e:
+            logging.error(f"Error reading file {file_path}: {e}")
+            return True
+
+    def find_and_delete_corrupted_edf(self):
+        """Find and delete corrupted EDF files in the specified folder."""
+        deleted_files = 0
+        edf_files = [os.path.join(root, file) for root, _, files in os.walk(self.directory) for file in files if
+                     file.endswith(".edf")]
+
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self.is_edf_corrupted, file): file for file in edf_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Checking files", unit="file"):
+                file = futures[future]
+                try:
+                    if future.result():
+                        logging.warning(f"Corrupted file: {file}")
+                        os.remove(file)
+                        logging.info(f"File deleted: {file}")
+                        deleted_files += 1
+                except Exception as e:
+                    logging.error(f"Error deleting file {file}: {e}")
+
+        return deleted_files
+
+    @staticmethod
+    def get_edf_start_time(file_path):
+        """Extract the recording start time from an EDF file."""
+        try:
+            raw = read_raw_edf(file_path, verbose=False)
+            start_datetime = raw.info['meas_date']
+            if start_datetime:
+                return start_datetime
+            return None
+        except Exception as e:
+            logging.error(f"Error reading file {file_path}: {e}")
+            return None
+
+    def find_edf_with_similar_start_time(self, time_delta=timedelta(minutes=10)):
+        """Find EDF files with similar start times."""
+        time_dict = defaultdict(list)
+        edf_files = [os.path.join(root, file) for root, _, files in os.walk(self.directory) for file in files if
+                     file.lower().endswith('.edf')]
+
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self.get_edf_start_time, file): file for file in edf_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files", unit="file"):
+                file = futures[future]
+                try:
+                    start_datetime = future.result()
+                    if start_datetime:
+                        rounded_time = start_datetime - timedelta(minutes=start_datetime.minute % 10)
+                        time_dict[rounded_time].append((start_datetime, file))
+                except Exception as e:
+                    logging.error(f"Error processing file {file}: {e}")
+
+        similar_time_groups = []
+        for rounded_time, files in time_dict.items():
+            if len(files) > 1:
+                files.sort()
+                for i in range(1, len(files)):
+                    if files[i][0] - files[i - 1][0] <= time_delta:
+                        similar_time_groups.append(files)
+                        break
+
+        return similar_time_groups
+
+    @staticmethod
+    def calculate_file_hash(file_path, hash_algorithm="md5", chunk_size=8192):
+        """Calculate the file hash for content verification."""
+        hash_func = hashlib.new(hash_algorithm)
+        with open(file_path, "rb") as f:
+            while chunk := f.read(chunk_size):
+                hash_func.update(chunk)
+        return hash_func.hexdigest()
+
+    def find_duplicate_files(self):
+        """Find duplicate files in the specified directory."""
+        size_dict = defaultdict(list)
+
+        for root, _, files in os.walk(self.directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                file_size = os.path.getsize(file_path)
+                size_dict[file_size].append(file_path)
+
+        hash_dict = defaultdict(list)
+        for size, paths in tqdm(size_dict.items(), desc="Checking files", unit="group"):
+            if len(paths) > 1:
+                for path in paths:
+                    file_hash = self.calculate_file_hash(path)
+                    hash_dict[file_hash].append(path)
+
+        duplicates = {hash_val: paths for hash_val, paths in hash_dict.items() if len(paths) > 1}
+        return duplicates
+
+    @staticmethod
+    def delete_duplicates(duplicates):
+        """Delete all duplicates except one."""
+        for hash_val, paths in duplicates.items():
+            for path in tqdm(paths[1:], desc="Deleting duplicates", unit="file"):
+                try:
+                    os.remove(path)
+                    logging.info(f"Deleted file: {path}")
+                except OSError as e:
+                    logging.error(f"Error deleting file {path}: {e}")
+
+    @staticmethod
+    def calculate_age(birthdate, recording_date):
+        """Calculate the age at the time of recording."""
+        try:
+            if isinstance(birthdate, str):
+                birthdate = parse(birthdate)
+            if isinstance(recording_date, str):
+                recording_date = parse(recording_date)
+            if hasattr(recording_date, 'tzinfo') and recording_date.tzinfo is not None:
+                recording_date = recording_date.replace(tzinfo=None)
+            age = recording_date.year - birthdate.year
+            if (recording_date.month, recording_date.day) < (birthdate.month, birthdate.day):
+                age -= 1
+            return age
+        except Exception as e:
+            logging.error(f"Error calculating age: {e}")
+            return None
+
+    def generate_statistics(self, metadata_list):
+        """Generate descriptive statistics from metadata and save results."""
+        stats = defaultdict(list)
+        for metadata in metadata_list:
+            subject_info = metadata.get('subject_info', {})
+            stats['file_name'].append(metadata['file_name'])
+            stats['sex'].append(
+                'Male' if subject_info.get('sex') == 1 else 'Female' if subject_info.get('sex') == 2 else 'Unknown')
+
+            birthdate = subject_info.get('birthday')
+            recording_date = metadata.get('meas_date')
+            if birthdate and recording_date:
+                age = self.calculate_age(birthdate, recording_date)
+                if age is not None:
+                    stats['age'].append(min(age, 60))  # Limit age to 60 years
+
+            stats['duration_minutes'].append(metadata['duration'] / 60)
+
+        df = DataFrame(stats)
+        descriptive_stats = {
+            'sex_distribution': df['sex'].value_counts(),
+            'age_distribution': df['age'].describe() if 'age' in df.columns else None,
+            'duration_stats': df['duration_minutes'].describe()
+        }
+        if self.visualizer is None:
+            raise ValueError("Visualizer is not initialized.")
+        self.visualizer.visualize_statistics(df)
+        output_csv_path = os.path.join(self.output_dir, 'edf_metadata_stats.csv')
+        df.to_csv(output_csv_path, index=False)
+        with open(os.path.join(self.output_dir, 'descriptive_stats.txt'), 'w') as f:
+            f.write("Descriptive Statistics:\n")
+            f.write(f"Sex Distribution:\n{descriptive_stats['sex_distribution']}\n")
+            f.write(f"Age Distribution:\n{descriptive_stats['age_distribution']}\n")
+            f.write(f"Duration Statistics:\n{descriptive_stats['duration_stats']}\n")
+
+        return df, descriptive_stats
+
+    def generate_patient_table(self):
+        """Generate a CSV table with unique patient names, sex, and age at recording."""
+        files = [f for f in os.listdir(self.directory) if f.endswith(".edf")]
+        patient_data = set()
+
+        def process_file(file):
+            """Process a single file to extract patient data."""
+            try:
+                name = self._extract_patient_name(file)
+                translated_name = translit(name, 'ru', reversed=True)
+
+                metadata = self.get_edf_metadata(os.path.join(self.directory, file))
+                if metadata:
+                    subject_info = metadata.get('subject_info', {})
+
+                    sex = subject_info.get('sex', 'Unknown')
+                    if sex == 1:
+                        sex = 'M'
+                    elif sex == 2:
+                        sex = 'F'
+                    else:
+                        sex = 'Unknown'
+
+                    birthdate = subject_info.get('birthday')
+                    recording_date = metadata.get('meas_date')
+                    age = None
+                    if birthdate and recording_date:
+                        age = self.calculate_age(birthdate, recording_date)
+
+                    return translated_name, sex, age
+            except Exception as e:
+                logging.error(f"Error processing file {file}: {e}")
+            return None
+
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(process_file, file): file for file in files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files", unit="file"):
+                try:
+                    result = future.result()
+                    if result:
+                        patient_data.add(result)
+                except Exception as e:
+                    logging.error(f"Error processing file: {e}")
+
+        sorted_data = sorted(patient_data, key=lambda x: x[0])
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        output_path = os.path.join(self.output_dir, "patient_table.csv")
+        with open(output_path, mode='w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow(["Patient Name", "Sex", "Age at Recording (years)"])
+            for name, sex, age in sorted_data:
+                writer.writerow([name, sex, age if age is not None else "Unknown"])
+
+        return f"Patient table saved to {output_path}"
+
+    @staticmethod
+    def _extract_patient_name(filename):
+        """Extract patient name from the filename."""
+        parts = filename.replace(".edf", "").split("_")
+        if len(parts) >= 3:
+            return " ".join(parts[:3])
+        raise ValueError(f"Invalid file name: {filename}")
+
+    def randomize_filenames(self):
+        """Randomize file names in the directory."""
+        files = [f for f in os.listdir(self.directory) if os.path.isfile(os.path.join(self.directory, f))]
+        used_codes = set()
+        name_mapping = []
+
+        for old_name in files:
+            new_name = self._generate_unique_code(used_codes) + os.path.splitext(old_name)[1]
+            os.rename(os.path.join(self.directory, old_name), os.path.join(self.directory, new_name))
+            name_mapping.append((old_name, new_name))
+
+        output_csv_path = os.path.join(self.directory, "name_mapping.csv")
+        with open(output_csv_path, mode='w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Old Name', 'New Name'])
+            writer.writerows(name_mapping)
+
+        return f"File names randomized. Correspondence table saved to {output_csv_path}"
+
+    @staticmethod
+    def _generate_unique_code(used_codes):
+        """Generate a unique 6-digit numeric code."""
+        while True:
+            code = ''.join(random.choices('0123456789', k=6))
+            if code not in used_codes:
+                used_codes.add(code)
+                return code
+
+    def remove_patient_info(self):
+        """Remove patient information from EDF files."""
+        files = [f for f in os.listdir(self.directory) if f.endswith(".edf")]
+        for file in tqdm(files, desc="Processing files", unit="file"):
+            try:
+                self._remove_patient_info(file)
+                logging.info(f"Patient information removed from file {file}")
+            except Exception as e:
+                logging.error(f"Error removing patient information from file {file}: {e}")
+
+    def _remove_patient_info(self, file):
+        """Remove patient information from an EDF file, preserving UUID, sex, and birthdate."""
+        file_path = os.path.join(self.directory, file)
+        try:
+            with open(file_path, 'r+b') as f:
+                header = f.read(88).decode('ascii')
+                parts = header.split()
+                if len(parts) >= 5:
+                    uuid, sex, birthdate = parts[1], parts[2], parts[3]
+                    new_patient_info = f"{uuid} {sex} {birthdate} {'_' * 80}"
+                    new_patient_info = new_patient_info[:80]
+                    f.seek(8)
+                    f.write(new_patient_info.encode('ascii'))
+                else:
+                    logging.warning(f"Invalid EDF header in file {file}. Cannot remove patient info.")
+        except Exception as e:
+            logging.error(f"Error processing file {file}: {e}")
+
+    def read_edf_info(self):
+        """Read and display information from the first EDF file."""
+        files = [f for f in os.listdir(self.directory) if f.endswith(".edf")]
+        if not files:
+            return "No EDF files found in the directory."
+
+        first_file = files[0]
+        try:
+            metadata = self.get_edf_metadata(os.path.join(self.directory, first_file), detailed=True)
+            if metadata:
+                formatted_info = self._format_edf_info(metadata)
+                formatted_info += "\nФайл читается и доступен для дальнейшей обработки."
+                return formatted_info
+            else:
+                return "Failed to extract metadata from the file."
+        except Exception as e:
+            logging.error(f"Error reading information from file {first_file}: {e}")
+            return f"Ошибка при чтении файла {first_file}: {e}"
+
+    def _format_edf_info(self, metadata):
+        """Format EDF file information for human-readable output."""
+        subject_info = metadata.get('subject_info', {})
+        formatted_info = (
+            f"Информация о файле: {metadata['file_name']}\n"
+            f"Имя пациента: {subject_info.get('first_name', 'Не указано')} "
+            f"{subject_info.get('middle_name', '')} "
+            f"{subject_info.get('last_name', '')}\n"
+            f"Пол: {'Мужской' if subject_info.get('sex') == 1 else 'Женский' if subject_info.get('sex') == 2 else 'Не указан'}\n"
+            f"Дата рождения: {subject_info.get('birthday', 'Не указана')}\n"
+            f"Дата записи: {metadata.get('meas_date', 'Не указана')}\n"
+            f"Длительность записи: {metadata['duration'] / 60:.2f} минут\n"
+            f"Частота дискретизации: {metadata['sfreq']} Гц\n"
+            f"Каналы: {', '.join(metadata['channels'])}\n"
+        )
+        return formatted_info
+
+    def run(self):
+        """Run the EDF processing pipeline."""
+        self.check_directory()
+        metadata_list = self.analyze_directory()
+        df, descriptive_stats = self.generate_statistics(metadata_list)
+        self.visualizer.visualize_statistics(df)
+        self.export_statistics(df, descriptive_stats)
+        logging.info("EDF processing completed.")
+
+if __name__ == "__main__":
+    directory = input("Enter the path to the directory containing EDF files: ").strip()
+    processor = EDFProcessor(directory)
+    processor.run()
+
+
+# core/edf_segmentor.py
+import mne
+from mne.viz import plot_montage
+from core.montage_manager import MontageManager
+from config.settings import settings
+import numpy as np
+from tabulate import tabulate
+import tkinter as tk
+
+class EventProcessor:
+    """Handler for generating event names and processing events."""
+    @staticmethod
+    def get_event_name(evt_code, ev_id):
+        """Returns the event name based on its code."""
+        return next((name for name, code in ev_id.items() if code == evt_code), "Unknown")
+
+    @staticmethod
+    def generate_segment_name(base_name, existing_names):
+        """Generates a unique name for a segment."""
+        seg_name = base_name
+        counter = 1
+        while seg_name in existing_names:
+            seg_name = f"{base_name}_{counter}"
+            counter += 1
+        return seg_name
+
+class EDFSegmentor:
+    """Class for processing EDF files, including loading metadata and splitting into segments."""
+    def __init__(self, output_widget):
+        self.seg_dict = {}
+        self.output_widget = output_widget
+        self.raw = None
+        self.events = None
+        self.event_id = None
+
+    def load_metadata(self, file_path):
+        """Loads metadata from an EDF file."""
+        try:
+            self.output_widget.delete(1.0, tk.END)
+            self.raw = mne.io.read_raw_edf(file_path, preload=True)
+            if 'ECG  ECG' in self.raw.ch_names:
+                self.raw.drop_channels(['ECG  ECG'])
+                self.output_widget.insert(tk.END, "ECG channel removed.\n")
+            self.events, self.event_id = mne.events_from_annotations(self.raw)
+            self.output_widget.insert(tk.END, self._format_output())
+        except Exception as e:
+            self.output_widget.insert(tk.END, f"Error: Failed to load metadata: {str(e)}\n")
+            raise Exception(f"Failed to load metadata: {str(e)}")
+
+    def _format_output(self):
+        """Formats output information about the file, channels, and events."""
+        subject_info = self.raw.info.get('subject_info', {})
+        output_lines = [
+            f"Full Name: {subject_info.get('first_name', 'Not specified')} "
+            f"{subject_info.get('middle_name', '')} "
+            f"{subject_info.get('last_name', '')}\n",
+            f"Date of Birth: {subject_info.get('birthday', 'Not specified')}\n",
+            f"Sex: { {1: 'Male', 0: 'Female'}.get(subject_info.get('sex'), 'Not specified') }\n",
+            f"Study Date: {subject_info.get('meas_date', 'Not specified')}\n",
+            f"Number of channels: {len(self.raw.ch_names)}\n",
+            f"Sampling frequency: {self.raw.info['sfreq']} Hz\n"
+        ]
+        montage = MontageManager.create_montage(len(self.raw.ch_names))
+        if montage:
+            self.raw.set_montage(montage)
+            output_lines.append("Montage successfully applied.\n")
+            # plot_montage(montage, kind='topomap', show_names=True, sphere='auto', scale=1.2)
+        else:
+            output_lines.append("Montage not applied: unsuitable number of channels.\n")
+        output_lines.append(self._format_channel_info())
+        output_lines.append(self._format_event_info())
+        return ''.join(output_lines)
+
+    def _format_channel_info(self):
+        """Formats channel information into a table."""
+        channels_info = self.raw.info['chs']
+        data = []
+        for channel in channels_info:
+            loc = channel['loc']
+            loc_x, loc_y, loc_z = ('-', '-', '-') if len(loc) < 3 or np.isnan(loc[:3]).any() else loc[:3]
+            data.append([
+                channel['ch_name'], channel['logno'], channel['scanno'], channel['cal'],
+                channel['range'], channel['unit_mul'], channel['unit'], channel['coord_frame'],
+                channel['coil_type'], channel['kind'], loc_x, loc_y, loc_z
+            ])
+        headers = [
+            "Channel Name", "Logical Number", "Scan Number", "Calibration", "Range",
+            "Unit Multiplier", "Unit", "Coordinate Frame", "Coil Type", "Channel Type",
+            "Loc X", "Loc Y", "Loc Z"
+        ]
+        return f"\nChannel Information:\n{tabulate(data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
+
+    def _format_event_info(self):
+        """Formats event information into a table."""
+        if self.events is None:
+            return "No events available in annotations.\n"
+        table_data = []
+        for s_idx in range(len(self.events)):
+            time_index = self.events[s_idx, 0]
+            event_id_value = self.events[s_idx, 2]
+            evt_name = EventProcessor.get_event_name(event_id_value, self.event_id)
+            time_seconds = time_index / self.raw.info['sfreq']
+            table_data.append([f"{time_seconds:.2f}", event_id_value, evt_name])
+        headers = ["Time (sec)", "Event ID", "Description"]
+        return f"\nNumber of events: {len(self.events)}\nEvent List:\n{tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
+
+    def add_seg(self, s_idx, e_idx):
+        """Adds a segment to the segment dictionary."""
+        s_t = self.events[s_idx, 0] / self.raw.info['sfreq']
+        e_t = self.events[e_idx, 0] / self.raw.info['sfreq'] if e_idx is not None else self.raw.times[-1]
+        if e_t - s_t < settings.MIN_SEGMENT_DURATION:
+            return
+        evt_code = self.events[s_idx, 2]
+        evt_name = EventProcessor.get_event_name(evt_code, self.event_id)
+        next_evt = "End" if e_idx is None else EventProcessor.get_event_name(self.events[e_idx, 2], self.event_id)
+        seg_name = EventProcessor.generate_segment_name(evt_name, self.seg_dict.keys())
+        seg_data = self.raw.copy().crop(tmin=s_t, tmax=e_t)
+        self.seg_dict[seg_name] = {
+            'start_time': s_t,
+            'end_time': e_t,
+            'current_event': evt_name,
+            'next_event': next_evt,
+            'data': seg_data
+        }
+
+    def process(self):
+        """Processes the EDF file, splitting it into segments."""
+        self.output_widget.delete(1.0, tk.END)
+        if self.raw is None:
+            self.output_widget.insert(tk.END, "Error: Please select an EDF file for processing first.\n")
+            raise Exception("Please select an EDF file for processing first.")
+        self.output_widget.insert(tk.END, "Starting processing...\n")
+        if len(self.events) < 2:
+            self.output_widget.insert(tk.END, "Insufficient events to extract segments.\n")
+            return
+        for i in range(len(self.events) - 1):
+            self.add_seg(i, i + 1)
+        self.add_seg(len(self.events) - 1, None)
+        self._output_results()
+
+    def _output_results(self):
+        """Outputs the processing results to the text widget."""
+        structure_data = [
+            ["Key", "Key", "Type", "Example Value"],
+            ["*seg_name*", "", "", ""],
+            ["", "", "", ""],
+            ["", "start_time", "float", "0.60"],
+            ["", "end_time", "float", "15.00"],
+            ["", "current_event", "str", "Fon"],
+            ["", "next_event", "str", "OG"],
+            ["", "data", "RawEDF", "RawEDF Object"]
+        ]
+        self.output_widget.insert(tk.END, "Segment Dictionary Structure:\n")
+        self.output_widget.insert(tk.END, tabulate(structure_data, headers="firstrow", tablefmt=settings.TABLE_FORMAT) + "\n\n")
+        table_data = []
+        valid_segments_count = 0
+        for seg_name, t in self.seg_dict.items():
+            duration = t['end_time'] - t['start_time']
+            if duration >= settings.MIN_SEGMENT_DURATION:
+                table_data.append([
+                    seg_name,
+                    f"{t['start_time']:.3f}",
+                    f"{t['end_time']:.3f}",
+                    t['current_event'],
+                    t['next_event'],
+                    f"{duration:.3f}"
+                ])
+                valid_segments_count += 1
+        headers = ["Segment", "Start", "End", "From", "To", "Duration"]
+        self.output_widget.insert(tk.END, f"Number of segments with duration >= {settings.MIN_SEGMENT_DURATION} sec: {valid_segments_count}\n")
+        self.output_widget.insert(tk.END, "Segment Data:\n")
+        self.output_widget.insert(tk.END, tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT) + "\n")
+
+
+# core/edf_visualizer.py
+import os
+from seaborn import countplot, histplot
+import matplotlib.pyplot as plt
+
+class EDFVisualizer:
+    def __init__(self, output_dir):
+        """ Initialize the visualizer with the output directory. """
+        self.output_dir = os.path.normpath(output_dir)
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def visualize_statistics(self, df):
+        """ Visualize statistics and save plots to the output directory. """
+        self._visualize_sex_distribution(df)
+        self._visualize_age_distribution(df)
+        self._visualize_duration_distribution(df)
+
+    def _visualize_sex_distribution(self, df):
+        """ Visualize and save the sex distribution plot. """
+        if 'sex' in df.columns:
+            fig = plt.figure(figsize=(8, 6))
+            countplot(data=df, x='sex')
+            plt.title('Sex Distribution')
+            save_path = os.path.normpath(os.path.join(self.output_dir, 'sex_distribution.png'))
+            plt.savefig(save_path)
+            plt.close(fig)
+            print(f"Сохранено: {save_path}")
+
+    def _visualize_age_distribution(self, df):
+        """ Visualize and save the age distribution plot. """
+        if 'age' in df.columns:
+            age_data = df[df['age'].apply(lambda x: isinstance(x, (int, float)))]
+            if not age_data.empty:
+                fig = plt.figure(figsize=(8, 6))
+                histplot(data=age_data, x='age', bins=20, kde=True)
+                plt.title('Age Distribution')
+                save_path = os.path.normpath(os.path.join(self.output_dir, 'age_distribution.png'))
+                plt.savefig(save_path)
+                plt.close(fig)
+                print(f"Сохранено: {save_path}")
+
+    def _visualize_duration_distribution(self, df):
+        """ Visualize and save the recording duration distribution plot. """
+        if 'duration_minutes' in df.columns:
+            fig = plt.figure(figsize=(8, 6))
+            histplot(data=df, x='duration_minutes', bins=20, kde=True)
+            plt.title('Recording Duration (minutes)')
+            save_path = os.path.normpath(os.path.join(self.output_dir, 'duration_distribution.png'))
+            plt.savefig(save_path)
+            plt.close(fig)
+            print(f"Сохранено: {save_path}")
+
+
+# core/montage_manager.py
+import mne
+import numpy as np
+
+class MontageManager:
+    """Class for creating montages (electrode arrangements) for EEG."""
+    @staticmethod
+    def create_montage(num_channels):
+        """Creates a montage based on the number of channels."""
+        if num_channels in [10, 11]:
+            ch_n = ['EEG F3', 'EEG F4', 'EEG C3', 'EEG C4', 'EEG P3', 'EEG P4', 'EEG O1', 'EEG O2', 'EEG A2', 'EEG A1']
+            ch_c = np.array([
+                [-0.05, 0.0375, 0.06], [0.05, 0.0375, 0.06],
+                [-0.05, 0.0, 0.1], [0.05, 0.0, 0.1],
+                [-0.05, -0.0375, 0.08], [0.05, -0.0375, 0.08],
+                [-0.05, -0.075, 0.05], [0.05, -0.075, 0.05],
+                [0.1, 0.0, -0.002], [-0.1, 0.0, -0.002]
+            ])
+        elif num_channels in [19, 20]:
+            ch_n = [
+                'EEG FP1-A1', 'EEG FP2-A2', 'EEG F3-A1', 'EEG F4-A2',
+                'EEG C3-A1', 'EEG C4-A2', 'EEG P3-A1', 'EEG P4-A2',
+                'EEG O1-A1', 'EEG O2-A2', 'EEG F7-A1', 'EEG F8-A2',
+                'EEG T3-A1', 'EEG T4-A2', 'EEG T5-A1', 'EEG T6-A2',
+                'EEG FZ-A2', 'EEG CZ-A1', 'EEG PZ-A2'
+            ]
+            ch_c = np.array([
+                [-0.05, 0.075, 0.05], [0.05, 0.075, 0.05],
+                [-0.05, 0.0375, 0.06], [0.05, 0.0375, 0.06],
+                [-0.05, 0.0, 0.1], [0.05, 0.0, 0.1],
+                [-0.05, -0.0375, 0.08], [0.05, -0.0375, 0.08],
+                [-0.05, -0.075, 0.05], [0.05, -0.075, 0.05],
+                [-0.075, 0.0375, 0.06], [0.075, 0.0375, 0.06],
+                [-0.075, 0.0, 0.1], [0.075, 0.0, 0.1],
+                [-0.075, -0.0375, 0.08], [0.075, -0.0375, 0.08],
+                [0.0, 0.0375, 0.06], [0.0, 0.0, 0.1], [0.0, -0.0375, 0.08]
+            ])
+        else:
+            return None
+        dig_pts = [
+            dict(ident=i + 1, ch_name=name, r=coord,
+                 kind=mne.io.constants.FIFF.FIFFV_POINT_EEG,
+                 coord_frame=mne.io.constants.FIFF.FIFFV_COORD_HEAD)
+            for i, (name, coord) in enumerate(zip(ch_n, ch_c))
+        ]
+        return mne.channels.DigMontage(dig=dig_pts, ch_names=ch_n)
+
+
+# edf_app.py
+import tkinter as tk
+import logging
+from tkinter import filedialog, messagebox, scrolledtext
+from config.settings import settings
+from core.edf_processor import EDFProcessor
+from core.edf_segmentor import EDFSegmentor
+from tabulate import tabulate
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+class EDFApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("EDF File Manager")
+        self.root.geometry("1700x700")
+        self.directory = ""
+        self.processor = None
+        self.segmentor = None
+        self._setup_ui()
+
+    def _setup_ui(self):
+        """Initialize the user interface."""
+        self.button_frame = tk.Frame(self.root)
+        self.button_frame.pack(pady=10)
+
+        batch_label = tk.Label(self.button_frame, text="Batch Processing of EDF Files", font=("Arial", 11))
+        batch_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        batch_buttons = [
+            ("Open Folder", self.select_directory, "Select a folder containing EDF files"),
+            ("Rename EDF", self.rename_files, "Rename EDF files based on metadata"),
+            ("Delete Corrupted", self.check_corrupted, "Delete corrupted EDF files"),
+            ("Delete Duplicates", self.find_duplicates, "Find and delete duplicate EDF files"),
+            ("Find Similar", self.find_similar_time, "Find EDF files with similar start times"),
+            ("Generate Statistics", self.generate_stats, "Generate statistics for EDF files"),
+            ("Create Patient Table", self.generate_patient_table, "Create a CSV table with patient names"),
+            ("Randomize Filenames", self.randomize_filenames, "Randomize file names in the folder"),
+            ("Remove Patient Info", self.remove_patient_info, "Remove patient information from EDF files"),
+            ("Read EDF Info", self.read_edf_info, "Read and display information from EDF file"),
+        ]
+
+        for idx, (text, command, tooltip) in enumerate(batch_buttons):
+            btn = tk.Button(self.button_frame, text=text, command=command, state=tk.DISABLED if idx > 0 else tk.NORMAL)
+            btn.grid(row=0, column=idx + 1, padx=5, pady=5)
+            self._create_tooltip(btn, tooltip)
+
+        segmentation_label = tk.Label(self.button_frame, text="Segmentation of EDF Files", font=("Arial", 11))
+        segmentation_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+
+        segmentation_buttons = [
+            ("Load EDF File", self.load_edf_file, "Load an EDF file for segmentation"),
+            ("Split EDF File", self.split_into_segments, "Split the EDF file into segments"),
+        ]
+
+        for idx, (text, command, tooltip) in enumerate(segmentation_buttons):
+            btn = tk.Button(self.button_frame, text=text, command=command, state=tk.DISABLED)
+            btn.grid(row=1, column=idx + 1, padx=5, pady=5)
+            self._create_tooltip(btn, tooltip)
+
+        min_duration_label = tk.Label(self.button_frame, text="Min Segment (sec):", font=("Arial", 10))
+        min_duration_label.grid(row=1, column=len(segmentation_buttons) + 1, padx=5, pady=5, sticky="w")
+
+        self.min_duration_entry = tk.Entry(self.button_frame, width=10)
+        self.min_duration_entry.insert(0, str(settings.MIN_SEGMENT_DURATION))
+        self.min_duration_entry.grid(row=1, column=len(segmentation_buttons) + 2, padx=5, pady=5)
+
+        apply_duration_button = tk.Button(self.button_frame, text=" Apply ", command=self.apply_min_duration)
+        apply_duration_button.grid(row=1, column=len(segmentation_buttons) + 3, padx=5, pady=5, sticky="w")
+
+        exit_button = tk.Button(self.button_frame, text="Exit", command=self.root.quit)
+        exit_button.grid(row=1, column=len(segmentation_buttons) + 8, padx=5, pady=5, sticky="e")
+
+        self.text_output = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=210, height=40)
+        self.text_output.pack(pady=10)
+        self.text_output.bind("<Control-c>", self._copy_text)
+        self.text_output.bind("<Control-a>", self._select_all_text)
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Copy", command=self._copy_text)
+        self.text_output.bind("<Button-3>", self._show_context_menu)
+
+    def apply_min_duration(self):
+        """Apply the minimum segment duration from the entry field."""
+        try:
+            min_duration = float(self.min_duration_entry.get())
+            if min_duration <= 0:
+                raise ValueError("Duration must be greater than 0.")
+            settings.MIN_SEGMENT_DURATION = min_duration
+            messagebox.showinfo("Success", f"Minimum duration set: {min_duration} sec.")
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
+
+    def split_into_segments(self):
+        """Split the loaded EDF file into segments using the specified minimum duration."""
+        if self.segmentor:
+            try:
+                min_duration = float(self.min_duration_entry.get())
+                if min_duration <= 0:
+                    raise ValueError("Duration must be greater than 0.")
+                settings.MIN_SEGMENT_DURATION = min_duration
+                self.segmentor.process()
+            except ValueError as e:
+                messagebox.showerror("Error", str(e))
+
+    def _copy_text(self, event=None):
+        """Copy selected text to clipboard."""
+        try:
+            selected_text = self.text_output.selection_get()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(selected_text)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _select_all_text(self, event=None):
+        """Select all text in the output window."""
+        self.text_output.tag_add(tk.SEL, "1.0", tk.END)
+        self.text_output.mark_set(tk.INSERT, "1.0")
+        self.text_output.see(tk.INSERT)
+        return "break"
+
+    def _show_context_menu(self, event):
+        """Show the context menu on right-click."""
+        self.context_menu.post(event.x_root, event.y_root)
+
+    def _create_tooltip(self, widget, text):
+        """Create a tooltip for the widget."""
+        tooltip = tk.Toplevel(widget)
+        tooltip.wm_overrideredirect(True)
+        tooltip.wm_geometry("+0+0")
+        tooltip.withdraw()
+
+        label = tk.Label(tooltip, text=text, background="#ffffe0", relief="solid", borderwidth=1)
+        label.pack()
+
+        widget.bind("<Enter>", lambda e: self._show_tooltip(tooltip, widget))
+        widget.bind("<Leave>", lambda e: tooltip.withdraw())
+
+    @staticmethod
+    def _show_tooltip(tooltip, widget):
+        """Show the tooltip."""
+        x, y, _, _ = widget.bbox("insert")
+        x += widget.winfo_rootx() + 25
+        y += widget.winfo_rooty() + 25
+        tooltip.wm_geometry(f"+{x}+{y}")
+        tooltip.deiconify()
+
+    def select_directory(self):
+        """Select a directory containing EDF files."""
+        self.directory = filedialog.askdirectory()
+        if self.directory:
+            self.text_output.insert(tk.END, f"Selected directory: {self.directory}\n")
+            self.processor = EDFProcessor(self.directory)
+            for btn in self.button_frame.winfo_children():
+                if isinstance(btn, tk.Button) and btn["text"] != "Open Folder":
+                    btn.config(state=tk.NORMAL)
+
+    def load_edf_file(self):
+        """Load an EDF file for segmentation."""
+        file_path = filedialog.askopenfilename(filetypes=[("EDF files", "*.edf")])
+        if file_path:
+            self.segmentor = EDFSegmentor(self.text_output)
+            self.segmentor.load_metadata(file_path)
+            for btn in self.button_frame.winfo_children():
+                if isinstance(btn, tk.Button) and btn["text"] == "Split into Segments":
+                    btn.config(state=tk.NORMAL)
+
+    def split_into_segments(self):
+        """Split the loaded EDF file into segments."""
+        if self.segmentor:
+            self.segmentor.process()
+
+    def _execute_operation(self, operation_name, operation_func):
+        """Execute an operation with error handling."""
+        if not self.directory:
+            messagebox.showwarning("Error", "Directory not selected.")
+            return
+
+        self.text_output.insert(tk.END, f"Started {operation_name}...\n")
+        self.text_output.update_idletasks()
+
+        try:
+            result = operation_func()
+            self.text_output.insert(tk.END, f"{operation_name.capitalize()} completed.\n")
+            if result:
+                self.text_output.insert(tk.END, f"Result: {result}\n")
+        except Exception as e:
+            logging.error(f"Error during {operation_name}: {e}")
+            self.text_output.insert(tk.END, f"Error: {e}\n")
+            messagebox.showerror("Error", f"An error occurred: {e}")
+
+    def rename_files(self):
+        """Rename EDF files."""
+        self._execute_operation("file renaming process", self.processor.rename_edf_files)
+
+    def find_duplicates(self):
+        """Find and delete duplicates."""
+        self._execute_operation("duplicate search process", self._find_and_delete_duplicates)
+
+    def check_corrupted(self):
+        """Check for corrupted files."""
+        self._execute_operation("corrupted file check process", self.processor.find_and_delete_corrupted_edf)
+
+    def generate_stats(self):
+        """Generate statistics."""
+        self._execute_operation("statistics generation process", self._generate_statistics_wrapper)
+
+    def find_similar_time(self):
+        """Find files with similar start times."""
+        self._execute_operation("similar time search process", self.processor.find_edf_with_similar_start_time)
+
+    def generate_patient_table(self):
+        """Generate patient table."""
+        self._execute_operation("patient table creation process", self.processor.generate_patient_table)
+
+    def randomize_filenames(self):
+        """Randomize file names."""
+        self._execute_operation("filename randomization process", self.processor.randomize_filenames)
+
+    def remove_patient_info(self):
+        """Remove patient information."""
+        self._execute_operation("patient information removal process", self.processor.remove_patient_info)
+
+    def read_edf_info(self):
+        """Read EDF file information."""
+        self._execute_operation("EDF file information reading process", self.processor.read_edf_info)
+
+    def _find_and_delete_duplicates(self):
+        """Find and delete duplicate files."""
+        duplicates = self.processor.find_duplicate_files()
+        if duplicates:
+            self.text_output.insert(tk.END, "Duplicate files found:\n")
+            for hash_val, paths in duplicates.items():
+                self.text_output.insert(tk.END, f"Hash: {hash_val}\n")
+                for path in paths:
+                    self.text_output.insert(tk.END, f"  {path}\n")
+            self.processor.delete_duplicates(duplicates)
+            return "Duplicates deleted."
+        return "No duplicates found."
+
+    def _generate_statistics_wrapper(self):
+        """Generate and display statistics."""
+        metadata_list = self.processor.analyze_directory()
+        df, stats = self.processor.generate_statistics(metadata_list)
+        self._display_statistics(stats)
+        return "Statistics generated and visualized."
+
+    def _display_statistics(self, stats):
+        """Display statistics in the text field."""
+        self.text_output.insert(tk.END, "Descriptive statistics:\n")
+        if 'sex_distribution' in stats and stats['sex_distribution'] is not None:
+            self.text_output.insert(tk.END, "Sex distribution:\n")
+            self.text_output.insert(tk.END, tabulate(stats['sex_distribution'].items(), headers=["Sex", "Count"],
+                                                     tablefmt="pretty") + "\n")
+        if 'age_distribution' in stats and stats['age_distribution'] is not None:
+            self.text_output.insert(tk.END, "\nAge distribution:\n")
+            age_stats = stats['age_distribution']
+            self.text_output.insert(tk.END, tabulate(
+                [["Count", int(age_stats['count'])], ["Mean age", f"{age_stats['mean']:.2f} years"],
+                 ["Minimum age", f"{age_stats['min']} years"], ["Maximum age", f"{age_stats['max']} years"]],
+                headers=["Metric", "Value"], tablefmt="pretty") + "\n")
+        if 'duration_stats' in stats and stats['duration_stats'] is not None:
+            self.text_output.insert(tk.END, "\nRecording duration statistics (minutes):\n")
+            duration_stats = stats['duration_stats']
+            self.text_output.insert(tk.END, tabulate([["Mean duration", f"{duration_stats['mean']:.2f} min"],
+                                                      ["Minimum duration", f"{duration_stats['min']:.2f} min"],
+                                                      ["Maximum duration", f"{duration_stats['max']:.2f} min"]],
+                                                     headers=["Metric", "Value"], tablefmt="pretty") + "\n")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = EDFApp(root)
+    root.mainloop()

@@ -91,40 +91,93 @@ class EDFSegmentor:
         return f"\nChannel Information:\n{tabulate(data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
 
     def _format_event_info(self):
-        """Formats event information into a table."""
+        """Formats event information into a table, excluding all stimFlash events regardless of ID."""
         if self.events is None:
             return "No events available in annotations.\n"
-        table_data = []
-        for s_idx in range(len(self.events)):
-            time_index = self.events[s_idx, 0]
-            event_id_value = self.events[s_idx, 2]
-            evt_name = EventProcessor.get_event_name(event_id_value, self.event_id)
-            time_seconds = time_index / self.raw.info['sfreq']
-            table_data.append([f"{time_seconds:.2f}", event_id_value, evt_name])
-        headers = ["Time (sec)", "Event ID", "Description"]
-        return f"\nNumber of events: {len(self.events)}\nEvent List:\n{tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
 
-    def add_seg(self, s_idx, e_idx):
-        """Adds a segment to the segment dictionary."""
-        s_t = self.events[s_idx, 0] / self.raw.info['sfreq']
-        e_t = self.events[e_idx, 0] / self.raw.info['sfreq'] if e_idx is not None else self.raw.times[-1]
-        if e_t - s_t < settings.MIN_SEGMENT_DURATION:
-            return
-        evt_code = self.events[s_idx, 2]
-        evt_name = EventProcessor.get_event_name(evt_code, self.event_id)
-        next_evt = "End" if e_idx is None else EventProcessor.get_event_name(self.events[e_idx, 2], self.event_id)
-        seg_name = EventProcessor.generate_segment_name(evt_name, self.seg_dict.keys())
-        seg_data = self.raw.copy().crop(tmin=s_t, tmax=e_t)
-        self.seg_dict[seg_name] = {
-            'start_time': s_t,
-            'end_time': e_t,
-            'current_event': evt_name,
-            'next_event': next_evt,
-            'data': seg_data
+        main_events = []
+        stim_count = 0
+
+        for event in self.events:
+            event_id = event[2]
+            raw_name = EventProcessor.get_event_name(event_id, self.event_id)
+
+            if 'stimflash' in raw_name.lower():
+                stim_count += 1
+                continue
+
+            time_sec = event[0] / self.raw.info['sfreq']
+            simplified_name = self._simplify_segment_name(raw_name)
+            main_events.append({
+                'time': time_sec,
+                'id': event_id,
+                'name': simplified_name
+            })
+
+        output = [
+            f"\nEvent Markers ({len(main_events)} main events, {stim_count} stimFlash hidden)",
+            tabulate(
+                [[f"{e['time']:.2f}", e['id'], e['name']] for e in sorted(main_events, key=lambda x: x['time'])],
+                headers=["Time (s)", "ID", "Event Type"],
+                tablefmt=settings.TABLE_FORMAT
+            )
+        ]
+
+        if main_events:
+            stats = {}
+            for e in main_events:
+                stats[e['name']] = stats.get(e['name'], 0) + 1
+
+            output.extend([
+                "\n\nEvent Statistics:",
+                tabulate(
+                    sorted(stats.items(), key=lambda x: (-x[1], x[0])),
+                    headers=["Event Type", "Count"],
+                    tablefmt=settings.TABLE_FORMAT
+                )
+            ])
+        else:
+            output.append("\nNo significant events found")
+
+        return "\n".join(output)
+
+    def _simplify_segment_name(self, original_name):
+        """Simplifies and translates segment names, removing content in both () and [] brackets."""
+        name = original_name.split('(')[0].split('[')[0].strip()
+        name_mapping = {
+            "Фоновая запись": "Background",
+            "Открывание глаз": "Eyes Open",
+            "Закрывание глаз": "Eyes Closed",
+            "Фотостимуляция": "Photic Stim",
+            "После фотостимуляции": "Post-Photic",
+            "Без стимуляции": "Rest",
+            "Встроенный фотостимулятор оба, 50 мс, 1 Гц": "Photic 1Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 2 Гц": "Photic 2Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 4 Гц": "Photic 4Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 6 Гц": "Photic 6Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 8 Гц": "Photic 8Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 10 Гц": "Photic 10Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 12 Гц": "Photic 12Hz",
+            "Встроенный фотостимулятор оба, 50 мс, 14 Гц": "Photic 14Hz",
+            "Встроенный фотостимулятор оба, 30 мс, 16 Гц": "Photic 16Hz",
+            "Встроенный фотостимулятор оба, 30 мс, 18 Гц": "Photic 18Hz",
+            "Встроенный фотостимулятор оба, 30 мс, 20 Гц": "Photic 20Hz",
+            "Встроенный фотостимулятор оба, 15 мс, 50 Гц": "Photic 50Hz",
+            "Встроенный фотостимулятор оба, 10 мс, 60 Гц": "Photic 60Hz",
+            "Встроенный слуховой стимулятор оба, 110 дБ, 10 мс, Тон 1000 Гц, Сжатие, 1 Гц": "Auditory 1KHz",
+            "Остановка стимуляции": "Stim End",
+            "Гипервентиляция": "Hyperventilation",
+            "Гипервентиляция 1 мин.": "Hypervent 1min",
+            "Гипервентиляция 2 мин.": "Hypervent 2min",
+            "Гипервентиляция 3 мин.": "Hypervent 3min",
+            "После гипервентиляции": "Post-Hypervent",
+            "Окончание После гипервентиляции": "Post-Hypervent End",
+            "Разрыв записи": "Recording Gap"
         }
+        return name_mapping.get(name, name.split('(')[0].split('[')[0].strip())
 
     def process(self):
-        """Processes the EDF file, splitting it into segments."""
+        """Processes the EDF file, splitting it into segments with proper event grouping."""
         self.output_widget.delete(1.0, tk.END)
         if self.raw is None:
             self.output_widget.insert(tk.END, "Error: Please select an EDF file for processing first.\n")
@@ -133,9 +186,57 @@ class EDFSegmentor:
         if len(self.events) < 2:
             self.output_widget.insert(tk.END, "Insufficient events to extract segments.\n")
             return
-        for i in range(len(self.events) - 1):
-            self.add_seg(i, i + 1)
-        self.add_seg(len(self.events) - 1, None)
+        filtered_events = []
+        for event in self.events:
+            if event[2] == 1:  # skip stimFlash
+                continue
+            evt_name = EventProcessor.get_event_name(event[2], self.event_id)
+            filtered_events.append((event[0], event[2], evt_name))
+        if len(filtered_events) < 2:
+            self.output_widget.insert(tk.END, "No valid events after filtering.\n")
+            return
+        grouped_events = []
+        i = 0
+        while i < len(filtered_events):
+            current_time, current_id, current_name = filtered_events[i]
+            if "Фотостимуляция" in current_name and i + 1 < len(filtered_events):
+                next_time, next_id, next_name = filtered_events[i + 1]
+                if "Встроенный фотостимулятор" in next_name:
+                    grouped_events.append((current_time, next_id, next_name))
+                    i += 2
+                    continue
+            grouped_events.append((current_time, current_id, current_name))
+            i += 1
+        for i in range(len(grouped_events) - 1):
+            start_time = grouped_events[i][0] / self.raw.info['sfreq']
+            end_time = grouped_events[i + 1][0] / self.raw.info['sfreq']
+            if end_time - start_time < settings.MIN_SEGMENT_DURATION:
+                continue
+            original_name = grouped_events[i][2]
+            simplified_name = self._simplify_segment_name(original_name)
+            next_event = self._simplify_segment_name(grouped_events[i + 1][2])
+            seg_name = EventProcessor.generate_segment_name(simplified_name, self.seg_dict.keys())
+            seg_data = self.raw.copy().crop(tmin=start_time, tmax=end_time)
+            self.seg_dict[seg_name] = {
+                'start_time': start_time,
+                'end_time': end_time,
+                'current_event': simplified_name,
+                'next_event': next_event,
+                'data': seg_data
+            }
+        if len(grouped_events) > 0:
+            last_time = grouped_events[-1][0] / self.raw.info['sfreq']
+            original_name = grouped_events[-1][2]
+            simplified_name = self._simplify_segment_name(original_name)
+            seg_name = EventProcessor.generate_segment_name(simplified_name, self.seg_dict.keys())
+            seg_data = self.raw.copy().crop(tmin=last_time)
+            self.seg_dict[seg_name] = {
+                'start_time': last_time,
+                'end_time': self.raw.times[-1],
+                'current_event': simplified_name,
+                'next_event': "End",
+                'data': seg_data
+            }
         self._output_results()
 
     def _output_results(self):

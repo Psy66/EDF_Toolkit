@@ -1,11 +1,14 @@
 # edf_app.py
+import os
 import tkinter as tk
 import logging
+from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext
 from config.settings import settings
 from core.edf_processor import EDFProcessor
 from core.edf_segmentor import EDFSegmentor
 from tabulate import tabulate
+from core.db_manager import DBManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -17,6 +20,7 @@ class EDFApp:
         self.directory = ""
         self.processor = None
         self.segmentor = None
+        self.db_manager = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -68,8 +72,23 @@ class EDFApp:
         apply_duration_button = tk.Button(self.button_frame, text=" Apply ", command=self.apply_min_duration)
         apply_duration_button.grid(row=1, column=len(segmentation_buttons) + 3, padx=5, pady=5, sticky="w")
 
+        db_label = tk.Label(self.button_frame, text="Database Manager", font=("Arial", 11))
+        db_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+
+        db_buttons = [
+            ("Create DB", self.create_database, "Create SQLite database structure"),
+            ("Fill Segments", self.fill_segments_db, "Fill database with segments data"),
+            ("Edit DB", self.edit_database, "Edit database tables manually"),
+        ]
+
+        for idx, (text, command, tooltip) in enumerate(db_buttons):
+            btn = tk.Button(self.button_frame, text=text, command=command, state=tk.DISABLED)
+            btn.grid(row=2, column=idx + 1, padx=5, pady=5)
+            self._create_tooltip(btn, tooltip)
+            setattr(self, f"db_button_{idx}", btn)
+
         exit_button = tk.Button(self.button_frame, text="Exit", command=self.root.quit)
-        exit_button.grid(row=1, column=len(segmentation_buttons) + 8, padx=5, pady=5, sticky="e")
+        exit_button.grid(row=2, column=len(segmentation_buttons) + 8, padx=5, pady=5, sticky="e")
 
         self.text_output = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=210, height=40)
         self.text_output.pack(pady=10)
@@ -78,6 +97,202 @@ class EDFApp:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
+
+    def create_database(self):
+        """Create SQLite database structure."""
+        if not self.directory:
+            messagebox.showwarning("Error", "Directory not selected.")
+            return
+
+        self.db_manager = DBManager(self.directory)
+        if self.db_manager.initialize_db():
+            self.text_output.insert(tk.END, f"Database created successfully in: {self.db_manager.db_path}\n")
+            # Активируем кнопки работы с БД
+            for i in range(3):
+                getattr(self, f"db_button_{i}").config(state=tk.NORMAL)
+        else:
+            self.text_output.insert(tk.END, "Failed to create database.\n")
+
+    def fill_segments_db(self):
+        """Fill database with segments data from current segmentation."""
+        if not self.db_manager:
+            messagebox.showwarning("Error", "Database not created. Please create DB first.")
+            return
+
+        if not hasattr(self, 'segmentor') or not self.segmentor or not self.segmentor.seg_dict:
+            messagebox.showwarning("Error", "No segments available. Please load and segment EDF file first.")
+            return
+
+        try:
+            # Получаем информацию о текущем EDF файле
+            edf_file_path = self.segmentor.raw.filenames[0]
+            file_name = os.path.basename(edf_file_path)
+            file_hash = self.processor.calculate_file_hash(edf_file_path)
+            start_date = self.segmentor.raw.info['meas_date']
+
+            if isinstance(start_date, (tuple, list)):  # MNE иногда возвращает кортеж
+                start_date = datetime.fromtimestamp(start_date[0])
+
+            # Проверяем, есть ли уже такой файл в БД
+            existing_edf = self.db_manager.find_edf_by_hash(file_hash)
+            if existing_edf:
+                messagebox.showwarning("Warning",
+                                       f"EDF file {file_name} already exists in database with ID {existing_edf.id}. "
+                                       "Segments will not be added to avoid duplicates.")
+                return
+
+            # Получаем информацию о пациенте
+            subject_info = self.segmentor.raw.info.get('subject_info', {})
+            patient_name = " ".join([
+                subject_info.get('first_name', ''),
+                subject_info.get('middle_name', ''),
+                subject_info.get('last_name', '')
+            ]).strip()
+
+            birthday = subject_info.get('birthday')
+            if isinstance(birthday, str):
+                birthday = datetime.strptime(birthday, '%Y-%m-%d').date()
+
+            sex = subject_info.get('sex', 'N')
+            if sex == 1:
+                sex = 'M'
+            elif sex == 2:
+                sex = 'F'
+
+            # Находим или создаем пациента
+            patient = self.db_manager.find_patient(patient_name, birthday)
+            if not patient:
+                age = self.processor.calculate_age(birthday, start_date)
+                patient = self.db_manager.add_patient(
+                    name=patient_name,
+                    birthday=birthday,
+                    sex=sex,
+                    age=age,
+                    notes="Added automatically from EDF processing"
+                )
+                if not patient:
+                    raise Exception("Failed to add patient to database")
+
+            # Добавляем EDF файл
+            edf_file = self.db_manager.add_edf_file(
+                patient_id=patient.id,
+                file_hash=file_hash,
+                start_date=start_date,
+                eeg_channels=len(self.segmentor.raw.ch_names),
+                sampling_rate=self.segmentor.raw.info['sfreq'],
+                montage=str(self.segmentor.raw.info.get('montage', 'Unknown')),
+                notes=f"Original file: {file_name}"
+            )
+            if not edf_file:
+                raise Exception("Failed to add EDF file to database")
+
+            # Добавляем сегменты
+            added_segments = self.db_manager.add_segments(edf_file.id, self.segmentor.seg_dict)
+            if added_segments is None:
+                raise Exception("Failed to add segments to database")
+
+            self.text_output.insert(tk.END,
+                                    f"Successfully added to database:\n"
+                                    f"- Patient: {patient_name} (ID: {patient.id})\n"
+                                    f"- EDF file: {file_name} (ID: {edf_file.id})\n"
+                                    f"- Segments: {len(added_segments)}\n")
+
+        except Exception as e:
+            self.text_output.insert(tk.END, f"Error filling database: {str(e)}\n")
+            messagebox.showerror("Error", f"Failed to fill database: {str(e)}")
+
+    def edit_database(self):
+        """Open a simple interface to edit database tables."""
+        if not self.db_manager:
+            messagebox.showwarning("Error", "Database not created. Please create DB first.")
+            return
+
+        try:
+            edit_window = tk.Toplevel(self.root)
+            edit_window.title("Database Editor")
+            edit_window.geometry("1000x600")
+            tk.Label(edit_window, text="Select Table:").pack(pady=5)
+            tables = self.db_manager.get_tables()
+            table_var = tk.StringVar(edit_window)
+            table_var.set(tables[0] if tables else "")
+            table_menu = tk.OptionMenu(edit_window, table_var, *tables)
+            table_menu.pack(pady=5)
+            table_frame = tk.Frame(edit_window)
+            table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            canvas = tk.Canvas(table_frame)
+            scrollbar = tk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
+            scrollable_frame = tk.Frame(canvas)
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(
+                    scrollregion=canvas.bbox("all")
+                )
+            )
+
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            def load_table_data():
+                selected_table = table_var.get()
+                if not selected_table:
+                    return
+
+                columns, data = self.db_manager.get_table_data(selected_table)
+                for widget in scrollable_frame.winfo_children():
+                    widget.destroy()
+                for col_idx, col_name in enumerate(columns):
+                    tk.Label(scrollable_frame, text=col_name, relief=tk.RIDGE,
+                             width=20, font=('Arial', 10, 'bold')).grid(
+                        row=0, column=col_idx, sticky="nsew")
+                for row_idx, row in enumerate(data, start=1):
+                    for col_idx, value in enumerate(row):
+                        tk.Label(scrollable_frame, text=str(value), relief=tk.GROOVE,
+                                 width=20).grid(row=row_idx, column=col_idx, sticky="nsew")
+                for i in range(len(columns)):
+                    scrollable_frame.columnconfigure(i, weight=1)
+
+            tk.Button(edit_window, text="Load Table", command=load_table_data).pack(pady=5)
+            def open_sql_editor():
+                sql_window = tk.Toplevel(edit_window)
+                sql_window.title("SQL Editor")
+                sql_window.geometry("800x500")
+                tk.Label(sql_window, text="Enter SQL Query:").pack(pady=5)
+                sql_text = tk.Text(sql_window, height=10, width=100)
+                sql_text.pack(pady=5, fill=tk.BOTH, expand=True)
+                result_text = tk.Text(sql_window, height=15, width=100)
+                result_text.pack(pady=5, fill=tk.BOTH, expand=True)
+
+                def execute_query():
+                    query = sql_text.get("1.0", tk.END).strip()
+                    if not query:
+                        return
+
+                    success, result, data = self.db_manager.execute_query(query)
+                    result_text.delete("1.0", tk.END)
+                    if success:
+                        if result:  # SELECT query
+                            columns = result
+                            rows = data
+                            result_text.insert(tk.END, " | ".join(columns) + "\n")
+                            result_text.insert(tk.END,
+                                               "-" * (sum(len(col) for col in columns) + 3 * len(columns)) + "\n")
+                            for row in rows:
+                                result_text.insert(tk.END, " | ".join(str(val) for val in row) + "\n")
+                        else:  # Non-SELECT query
+                            result_text.insert(tk.END, f"Query executed successfully. Rows affected: {data}")
+                    else:
+                        result_text.insert(tk.END, f"Error executing query: {result}")
+
+                tk.Button(sql_window, text="Execute", command=execute_query).pack(pady=5)
+
+            tk.Button(edit_window, text="SQL Editor", command=open_sql_editor).pack(pady=5)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open database editor: {str(e)}")
+
 
     def apply_min_duration(self):
         """Apply the minimum segment duration from the entry field."""
@@ -164,11 +379,6 @@ class EDFApp:
             for btn in self.button_frame.winfo_children():
                 if isinstance(btn, tk.Button) and btn["text"] == "Split into Segments":
                     btn.config(state=tk.NORMAL)
-
-    def split_into_segments(self):
-        """Split the loaded EDF file into segments."""
-        if self.segmentor:
-            self.segmentor.process()
 
     def _execute_operation(self, operation_name, operation_func):
         """Execute an operation with error handling."""
