@@ -52,11 +52,9 @@ class DBManager:
         """Инициализация менеджера БД с хранением всех файлов в подпапке DB."""
         self.directory = os.path.join(directory, "DB") if directory else "DB"
         os.makedirs(self.directory, exist_ok=True)  # Создаем папку если не существует
-
         self.db_path = os.path.join(self.directory, "eeg_database.db")
         self.segments_dir = os.path.join(self.directory, "segments")
         os.makedirs(self.segments_dir, exist_ok=True)
-
         self.conn = None
         self._initialize_db()
 
@@ -74,7 +72,6 @@ class DBManager:
         """Create database tables if they don't exist."""
         cursor = self.conn.cursor()
 
-        # Patients table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +125,6 @@ class DBManager:
             FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
         )
         """)
-
         self.conn.commit()
 
     def get_last_record(self, table_name: str):
@@ -160,25 +156,13 @@ class DBManager:
     def add_patient(self, name: str, sex: str, age: int, note: str = "") -> int:
         """
         Add a new patient to the database or return existing patient_id if patient already exists.
-
-        Args:
-            name: Full name of the patient
-            sex: Patient's sex ('M', 'F' or 'N')
-            age: Patient's age
-            note: Optional notes
-
-        Returns:
-            patient_id of the existing or newly created patient
         """
         # Check if patient already exists
         cursor = self.conn.cursor()
         cursor.execute("SELECT patient_id FROM patients WHERE name = ?", (name,))
         result = cursor.fetchone()
-
         if result:
             return result[0]
-
-        # Add new patient
         cursor.execute(
             "INSERT INTO patients (name, sex, age, note) VALUES (?, ?, ?, ?)",
             (name, sex, age, note)
@@ -196,32 +180,12 @@ class DBManager:
                      eeg_ch: int, rate: float, montage: str = "", notes: str = "") -> int:
         """
         Add a new EDF file to the database.
-
-        Args:
-            patient_id: ID of the patient
-            file_hash: Hash of the EDF file content
-            start_date: Recording start date (timestamp)
-            eeg_ch: Number of EEG channels
-            rate: Sampling rate
-            montage: Montage information
-            notes: Optional notes
-
-        Returns:
-            edf_id of the newly created record or existing record if file already exists
-
-        Raises:
-            ValueError: If EDF file with this hash already exists
         """
         cursor = self.conn.cursor()
-
-        # Check if EDF file already exists
         cursor.execute("SELECT edf_id FROM edf_files WHERE file_hash = ?", (file_hash,))
         result = cursor.fetchone()
-
         if result:
             raise ValueError(f"EDF file with hash {file_hash} already exists in database (edf_id: {result[0]})")
-
-        # Add new EDF file
         cursor.execute(
             "INSERT INTO edf_files (patient_id, file_hash, start_date, eeg_ch, rate, montage, notes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -235,33 +199,12 @@ class DBManager:
                     r_marker: str, notes: str = "") -> int:
         """
         Add a new segment to the database.
-
-        Args:
-            patient_id: ID of the patient
-            edf_id: ID of the EDF file
-            seg_fpath: Path to the segment file
-            start_time: Start time of the segment (seconds)
-            end_time: End time of the segment (seconds)
-            l_marker: Left marker name
-            r_marker: Right marker name
-            notes: Optional notes
-
-        Returns:
-            seg_id of the newly created record
-
-        Raises:
-            ValueError: If segment with this path already exists
         """
         cursor = self.conn.cursor()
-
-        # Check if segment already exists
         cursor.execute("SELECT seg_id FROM segments WHERE seg_fpath = ?", (seg_fpath,))
         result = cursor.fetchone()
-
         if result:
             raise ValueError(f"Segment with path {seg_fpath} already exists in database (seg_id: {result[0]})")
-
-        # Add new segment
         cursor.execute(
             "INSERT INTO segments (patient_id, edf_id, seg_fpath, start_time, end_time, l_marker, r_marker, notes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -273,15 +216,6 @@ class DBManager:
     def add_diagnosis(self, patient_id: int, ds_code: str, ds_descript: str, note: str = ""):
         """
         Add a diagnosis for a patient.
-
-        Args:
-            patient_id: ID of the patient
-            ds_code: Diagnosis code (ICD-10)
-            ds_descript: Diagnosis description
-            note: Optional notes
-
-        Raises:
-            sqlite3.IntegrityError: If diagnosis for this patient already exists
         """
         cursor = self.conn.cursor()
         cursor.execute(
@@ -320,54 +254,31 @@ class DBManager:
         """Get statistics about database records."""
         cursor = self.conn.cursor()
         stats = {}
-
         cursor.execute("SELECT COUNT(*) FROM patients")
         stats['patients'] = cursor.fetchone()[0]
-
         cursor.execute("SELECT COUNT(*) FROM edf_files")
         stats['edf_files'] = cursor.fetchone()[0]
-
         cursor.execute("SELECT COUNT(*) FROM segments")
         stats['segments'] = cursor.fetchone()[0]
-
         cursor.execute("SELECT COUNT(*) FROM diagnosis")
         stats['diagnoses'] = cursor.fetchone()[0]
-
         return stats
 
     def fill_segments_from_dict(self, seg_dict: Dict, edf_file_path: str) -> Tuple[int, int]:
         """
         Fill database with segments from the segment dictionary.
-
-        Args:
-            seg_dict: Dictionary with segment data (from EDFSegmentor)
-            edf_file_path: Path to the source EDF file
-
-        Returns:
-            Tuple of (patient_id, edf_id) for the added records
-
-        Raises:
-            ValueError: If EDF file already exists in database
         """
-        # Calculate file hash
         file_hash = self._calculate_file_hash(edf_file_path)
-
-        # Check if EDF file already exists
         if self.get_edf_file_by_hash(file_hash):
             raise ValueError("EDF file already exists in database")
-
-        # Extract patient info from the first segment (assuming all segments belong to same patient)
         first_seg = next(iter(seg_dict.values()))
         raw = first_seg['data'].info
-
-        # Get patient info
         subject_info = raw.get('subject_info', {})
         name = " ".join([
             subject_info.get('first_name', ''),
             subject_info.get('middle_name', ''),
             subject_info.get('last_name', '')
         ]).strip()
-
         sex = subject_info.get('sex', 'N')
         if sex == 1:
             sex = 'M'
@@ -375,8 +286,6 @@ class DBManager:
             sex = 'F'
         else:
             sex = 'N'
-
-        # Calculate age
         birthdate = subject_info.get('birthday')
         recording_date = raw.get('meas_date')
         age = None
@@ -386,15 +295,10 @@ class DBManager:
             age = recording_date.year - birthdate.year
             if (recording_date.month, recording_date.day) < (birthdate.month, birthdate.day):
                 age -= 1
-
-        # Add patient
         patient_id = self.add_patient(name, sex, age)
-
-        # Add EDF file
         start_date = raw.get('meas_date', datetime.now()).timestamp()
         eeg_ch = len([ch for ch in raw['ch_names'] if 'EEG' in ch])
         rate = raw['sfreq']
-
         edf_id = self.add_edf_file(
             patient_id=patient_id,
             file_hash=file_hash,
@@ -402,27 +306,16 @@ class DBManager:
             eeg_ch=eeg_ch,
             rate=rate
         )
-
-        # Create base directory for segments
         base_dir = os.path.join(
 	        self.segments_dir,
 	        os.path.splitext(os.path.basename(edf_file_path))[0]
         )
         os.makedirs(base_dir, exist_ok=True)
-
-        # Add segments
         for seg_name, seg_data in seg_dict.items():
-            # Clean segment name to make it filesystem-safe
             clean_seg_name = "".join(c if c.isalnum() else "_" for c in seg_name)
-
-            # Create filename with MNE-recommended suffix
             seg_fname = f"seg_{clean_seg_name}_eeg.fif"
             seg_fpath = os.path.join(base_dir, seg_fname)
-
-            # Save segment as FIF file
             seg_data['data'].save(seg_fpath, overwrite=True)
-
-            # Add segment to database
             self.add_segment(
                 patient_id=patient_id,
                 edf_id=edf_id,
@@ -432,7 +325,6 @@ class DBManager:
                 l_marker=seg_data['current_event'],
                 r_marker=seg_data['next_event']
             )
-
         return patient_id, edf_id
 
     @staticmethod
