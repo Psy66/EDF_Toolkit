@@ -1,18 +1,15 @@
 # edf_app.py
+import tkinter.font as tkfont
+import csv
 import os
 import tkinter as tk
 import logging
-from sqlalchemy import create_engine, text
-from datetime import datetime
-from tkinter import filedialog, messagebox, scrolledtext
-
-from sqlalchemy.orm import sessionmaker
-
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from config.settings import settings
 from core.edf_processor import EDFProcessor
 from core.edf_segmentor import EDFSegmentor
+from core.db_manager import DBManager
 from tabulate import tabulate
-from core.db_manager import DBManager, logger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -25,336 +22,446 @@ class EDFApp:
         self.processor = None
         self.segmentor = None
         self.db_manager = None
+        self._try_autoload_db()
         self._setup_ui()
 
+    def _try_autoload_db(self):
+        """Attempt to automatically load existing database"""
+        if not self.directory:
+            return
+
+        db_path = os.path.join(self.directory, "DB", "eeg_database.db")
+        if os.path.exists(db_path):
+            try:
+                self.db_manager = DBManager(self.directory)
+                self._enable_db_buttons()
+                self._update_db_status()
+                self.text_output.insert(tk.END, "Automatically loaded existing database\n")
+            except Exception as e:
+                self.text_output.insert(tk.END, f"Error loading database: {str(e)}\n")
+
     def _setup_ui(self):
-        """Initialize the user interface."""
+        """Initialize the user interface with all buttons in one frame."""
+        # Main button frame
         self.button_frame = tk.Frame(self.root)
         self.button_frame.pack(pady=10)
 
-        batch_label = tk.Label(self.button_frame, text="Batch Processing of EDF Files", font=("Arial", 11))
-        batch_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        # Configure grid columns to expand
+        for i in range(12):
+            self.button_frame.grid_columnconfigure(i, weight=1)
+
+        # Row 0: Batch Processing
+        tk.Label(self.button_frame, text="Batch Processing:", font=("Arial", 11)) \
+            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
         batch_buttons = [
-            ("Open Folder", self.select_directory, "Select a folder containing EDF files"),
-            ("Rename EDF", self.rename_files, "Rename EDF files based on metadata"),
-            ("Delete Corrupted", self.check_corrupted, "Delete corrupted EDF files"),
-            ("Delete Duplicates", self.find_duplicates, "Find and delete duplicate EDF files"),
-            ("Find Similar", self.find_similar_time, "Find EDF files with similar start times"),
-            ("Generate Statistics", self.generate_stats, "Generate statistics for EDF files"),
-            ("Create Patient Table", self.generate_patient_table, "Create a CSV table with patient names"),
-            ("Randomize Filenames", self.randomize_filenames, "Randomize file names in the folder"),
-            ("Remove Patient Info", self.remove_patient_info, "Remove patient information from EDF files"),
-            ("Read EDF Info", self.read_edf_info, "Read and display information from EDF file"),
+            ("Open", self.select_directory, "Select folder with EDF files"),
+            ("Rename", self.rename_files, "Rename EDF files by metadata"),
+            ("Check", self.check_corrupted, "Check for corrupted files"),
+            ("Dupes", self.find_duplicates, "Find and delete duplicates"),
+            ("Similar", self.find_similar_time, "Find files with similar times"),
+            ("Stats", self.generate_stats, "Generate statistics"),
+            ("Patients", self.generate_patient_table, "Create patient table"),
+            ("Random", self.randomize_filenames, "Randomize filenames"),
+            ("Anonym", self.remove_patient_info, "Remove patient info"),
+            ("Info", self.read_edf_info, "Show EDF file info"),
         ]
 
         for idx, (text, command, tooltip) in enumerate(batch_buttons):
-            btn = tk.Button(self.button_frame, text=text, command=command, state=tk.DISABLED if idx > 0 else tk.NORMAL)
-            btn.grid(row=0, column=idx + 1, padx=5, pady=5)
+            btn = tk.Button(self.button_frame, text=text, width=8, command=command,
+                            state=tk.DISABLED if idx > 0 else tk.NORMAL)
+            btn.grid(row=0, column=idx + 1, padx=2, pady=5, sticky="ew")
             self._create_tooltip(btn, tooltip)
 
-        segmentation_label = tk.Label(self.button_frame, text="Segmentation of EDF Files", font=("Arial", 11))
-        segmentation_label.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        # Row 1: Segmentation
+        tk.Label(self.button_frame, text="Segmentation:", font=("Arial", 11)) \
+            .grid(row=1, column=0, padx=5, pady=5, sticky="w")
 
-        segmentation_buttons = [
-            ("Load EDF File", self.load_edf_file, "Load an EDF file for segmentation"),
-            ("Split EDF File", self.split_into_segments, "Split the EDF file into segments"),
+        seg_buttons = [
+            ("Load", self.load_edf_file, "Load EDF file"),
+            ("Split", self.split_into_segments, "Split into segments"),
         ]
 
-        for idx, (text, command, tooltip) in enumerate(segmentation_buttons):
-            btn = tk.Button(self.button_frame, text=text, command=command, state=tk.DISABLED)
-            btn.grid(row=1, column=idx + 1, padx=5, pady=5)
+        for idx, (text, command, tooltip) in enumerate(seg_buttons):
+            btn = tk.Button(self.button_frame, text=text, width=8, command=command, state=tk.DISABLED)
+            btn.grid(row=1, column=idx + 1, padx=2, pady=5, sticky="ew")
             self._create_tooltip(btn, tooltip)
 
-        min_duration_label = tk.Label(self.button_frame, text="Min Segment (sec):", font=("Arial", 10))
-        min_duration_label.grid(row=1, column=len(segmentation_buttons) + 1, padx=5, pady=5, sticky="w")
+        # Segmentation duration controls
+        tk.Label(self.button_frame, text="Min (sec):", font=("Arial", 9)) \
+            .grid(row=1, column=3, padx=2, pady=5, sticky="e")
 
-        self.min_duration_entry = tk.Entry(self.button_frame, width=10)
+        self.min_duration_entry = tk.Entry(self.button_frame, width=6)
         self.min_duration_entry.insert(0, str(settings.MIN_SEGMENT_DURATION))
-        self.min_duration_entry.grid(row=1, column=len(segmentation_buttons) + 2, padx=5, pady=5)
+        self.min_duration_entry.grid(row=1, column=4, padx=2, pady=5, sticky="w")
 
-        apply_duration_button = tk.Button(self.button_frame, text=" Apply ", command=self.apply_min_duration)
-        apply_duration_button.grid(row=1, column=len(segmentation_buttons) + 3, padx=5, pady=5, sticky="w")
+        tk.Button(self.button_frame, text="Set", width=4, command=self.apply_min_duration) \
+            .grid(row=1, column=5, padx=2, pady=5, sticky="w")
 
-        db_label = tk.Label(self.button_frame, text="Database Manager", font=("Arial", 11))
-        db_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        # Row 2: Database Operations
+        tk.Label(self.button_frame, text="Database:", font=("Arial", 11)) \
+            .grid(row=2, column=0, padx=5, pady=5, sticky="w")
 
         db_buttons = [
-            ("Load DB", self.load_database, "Load SQLite database"),
-            ("Create DB", self.create_database, "Create SQLite database structure"),
-            ("Fill Segments", self.fill_segments_db, "Fill database with segments data"),
-            ("Edit DB", self.edit_database, "Edit database tables manually"),
+            ("Load/Create", self.create_database, "Create new database"),
+            ("Fill", self.fill_segments, "Fill with segments"),
+            ("Stats", self.show_db_stats, "Show statistics"),
+            ("Edit", self.edit_database, "View/edit tables"),
         ]
 
         for idx, (text, command, tooltip) in enumerate(db_buttons):
-            btn = tk.Button(self.button_frame, text=text, command=command, state=tk.DISABLED)
-            btn.grid(row=2, column=idx + 1, padx=5, pady=5)
+            btn = tk.Button(self.button_frame, text=text, width=8, command=command,
+                            state=tk.NORMAL if idx == 0 else tk.DISABLED)
+            btn.grid(row=2, column=idx + 1, padx=2, pady=5, sticky="ew")
             self._create_tooltip(btn, tooltip)
-            setattr(self, f"db_button_{idx}", btn)
 
-        exit_button = tk.Button(self.button_frame, text="Exit", command=self.root.quit)
-        exit_button.grid(row=2, column=len(segmentation_buttons) + 8, padx=5, pady=5, sticky="e")
+        # Database status label
+        self.db_status_label = tk.Label(self.button_frame, text="[DB Not Created]", fg="red")
+        self.db_status_label.grid(row=2, column=6, columnspan=4, padx=5, pady=5, sticky="w")
 
+        # Exit button
+        tk.Button(self.button_frame, text="Exit", width=8, command=self.root.quit) \
+            .grid(row=2, column=10, padx=2, pady=5, sticky="e")
+
+        # Text output area
         self.text_output = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=210, height=40)
         self.text_output.pack(pady=10)
         self.text_output.bind("<Control-c>", self._copy_text)
         self.text_output.bind("<Control-a>", self._select_all_text)
+
+        # Context menu
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
 
-    def load_database(self):
-        """Load existing database and show basic statistics."""
-        if not self.directory:
-            self.directory = filedialog.askdirectory(title="Select working directory")
-            if not self.directory:
-                return
-
-        db_path = os.path.join(self.directory, "DB", "eeg_database.db")
-        if not os.path.exists(db_path):
-            messagebox.showwarning("Warning", f"Database not found at: {db_path}")
-            return
+    def _display_table(self, parent, table_name):
+        """Отобразить содержимое таблицы с возможностью сортировки и контекстного меню."""
+        # Удаляем старый фрейм с таблицей
+        for widget in parent.winfo_children():
+            if isinstance(widget, tk.Frame) and widget != parent.winfo_children()[0]:
+                widget.destroy()
 
         try:
-            self.db_manager = DBManager(self.directory)
-            self.db_manager.engine = create_engine(f'sqlite:///{db_path}')
-            self.db_manager.Session = sessionmaker(bind=self.db_manager.engine)
+            # Создаем основной контейнер
+            table_container = tk.Frame(parent)
+            table_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-            # Получаем статистику по базе
-            stats = self._get_db_statistics()
+            # Панель инструментов
+            toolbar = tk.Frame(table_container)
+            toolbar.pack(fill=tk.X, pady=(0, 5))
 
-            # Выводим статистику
-            self.text_output.delete(1.0, tk.END)
-            self.text_output.insert(tk.END, f"Database loaded from: {db_path}\n\n")
-            self.text_output.insert(tk.END, "Database Statistics:\n")
-            self.text_output.insert(tk.END, "-" * 50 + "\n")
+            # Кнопка обновления
+            refresh_btn = tk.Button(toolbar, text="🔄 Обновить",
+                                    command=lambda: self._refresh_table(table_container, table_name),
+                                    bd=1, relief=tk.RAISED)
+            refresh_btn.pack(side=tk.LEFT, padx=2)
 
-            for table, count in stats.items():
-                self.text_output.insert(tk.END, f"{table:15}: {count} records\n")
+            # Кнопка экспорта
+            export_btn = tk.Button(toolbar, text="💾 Экспорт в CSV",
+                                   command=lambda: self._export_table(table_name),
+                                   bd=1, relief=tk.RAISED)
+            export_btn.pack(side=tk.LEFT, padx=2)
 
-            # Активируем кнопки работы с БД
-            for i in range(3):
-                getattr(self, f"db_button_{i}").config(state=tk.NORMAL)
+            # Получаем данные из БД
+            columns = self.db_manager.get_table_columns(table_name)
+            data = self.db_manager.get_table_data(table_name)
+
+            # Создаем Treeview с двойной буферизацией
+            table_frame = tk.Frame(table_container)
+            table_frame.pack(fill=tk.BOTH, expand=True)
+
+            scroll_y = tk.Scrollbar(table_frame)
+            scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+            scroll_x = tk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
+            scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+
+            self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
+                                     yscrollcommand=scroll_y.set,
+                                     xscrollcommand=scroll_x.set,
+                                     selectmode='extended')
+
+            # Оптимизация производительности для больших таблиц
+            self.tree.pack(fill=tk.BOTH, expand=True)
+            scroll_y.config(command=self.tree.yview)
+            scroll_x.config(command=self.tree.xview)
+
+            # Настройка колонок с автоматической шириной
+            for col in columns:
+                self.tree.heading(col, text=col,
+                                  command=lambda c=col: self._sort_treeview(self.tree, c, False))
+                self.tree.column(col, width=tkfont.Font().measure(col) + 20,
+                                 stretch=tk.YES, anchor=tk.W)
+
+            # Заполнение данными с прогресс-баром для больших таблиц
+            if len(data) > 1000:
+                progress = ttk.Progressbar(table_container, orient=tk.HORIZONTAL,
+                                           length=200, mode='determinate')
+                progress.pack(pady=5)
+                progress["maximum"] = len(data)
+
+                batch_size = 100
+                for i in range(0, len(data), batch_size):
+                    batch = data[i:i + batch_size]
+                    for row in batch:
+                        self.tree.insert("", tk.END, values=row)
+                    progress["value"] = i + len(batch)
+                    table_container.update()
+                progress.destroy()
+            else:
+                for row in data:
+                    self.tree.insert("", tk.END, values=row)
+
+            # Автоподбор ширины колонок
+            self._auto_resize_columns(self.tree, columns)
+
+            # Контекстное меню
+            self._setup_table_context_menu(table_name)
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load database: {str(e)}")
-            self.text_output.insert(tk.END, f"Error loading database: {str(e)}\n")
+            messagebox.showerror("Ошибка", f"Не удалось отобразить таблицу {table_name}:\n{str(e)}")
 
-    def _get_db_statistics(self):
-        """Get basic statistics about database tables."""
-        if not self.db_manager or not self.db_manager.engine:
-            return {}
+    def _sort_treeview(self, tree, col, reverse):
+        """Сортировка Treeview по колонке."""
+        data = [(tree.set(child, col), child) for child in tree.get_children('')]
+        data.sort(reverse=reverse)
 
-        stats = {}
-        tables = self.db_manager.get_tables()
+        for index, (val, child) in enumerate(data):
+            tree.move(child, '', index)
 
-        session = self.db_manager.Session()
+        tree.heading(col, command=lambda: self._sort_treeview(tree, col, not reverse))
+
+    def _auto_resize_columns(self, tree, columns):
+        """Автоматическая подстройка ширины колонок."""
+        for col in columns:
+            max_width = tkfont.Font().measure(col)
+            for row in tree.get_children():
+                cell_value = tree.set(row, col)
+                max_width = max(max_width, tkfont.Font().measure(str(cell_value)))
+            tree.column(col, width=max_width + 20)
+
+    def _setup_table_context_menu(self, table_name):
+        """Настройка контекстного меню для таблицы."""
+        menu = tk.Menu(self.tree, tearoff=0)
+
+        menu.add_command(label="Копировать", command=self._copy_table_data)
+        menu.add_command(label="Редактировать",
+                         command=lambda: self._edit_record(table_name))
+        menu.add_command(label="Удалить",
+                         command=lambda: self._delete_record(table_name))
+
+        self.tree.bind("<Button-3>", lambda event: menu.post(event.x_root, event.y_root))
+
+    def _refresh_table(self, container, table_name):
+        """Обновить содержимое таблицы."""
+        self._display_table(container, table_name)
+
+    def _export_table(self, table_name):
+        """Экспорт таблицы в CSV файл."""
         try:
-            for table in tables:
-                count = session.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
-                stats[table] = count
-        except Exception as e:
-            logger.error(f"Error getting database statistics: {str(e)}")
-        finally:
-            session.close()
-
-        return stats
-
-    def create_database(self):
-        """Create SQLite database structure."""
-        if not self.directory:
-            messagebox.showwarning("Error", "Directory not selected.")
-            return
-
-        self.db_manager = DBManager(self.directory)
-        if self.db_manager.initialize_db():
-            self.text_output.insert(tk.END, f"Database created successfully in: {self.db_manager.db_path}\n")
-            # Активируем кнопки работы с БД
-            for i in range(3):
-                getattr(self, f"db_button_{i}").config(state=tk.NORMAL)
-        else:
-            self.text_output.insert(tk.END, "Failed to create database.\n")
-
-    def fill_segments_db(self):
-        """Fill database with segments data from current segmentation."""
-        if not self.db_manager:
-            messagebox.showwarning("Error", "Database not created. Please create DB first.")
-            return
-
-        if not hasattr(self, 'segmentor') or not self.segmentor or not self.segmentor.seg_dict:
-            messagebox.showwarning("Error", "No segments available. Please load and segment EDF file first.")
-            return
-
-        try:
-            # Получаем информацию о текущем EDF файле
-            edf_file_path = self.segmentor.raw.filenames[0]
-            file_name = os.path.basename(edf_file_path)
-            file_hash = self.processor.calculate_file_hash(edf_file_path)
-            start_date = self.segmentor.raw.info['meas_date']
-
-            if isinstance(start_date, (tuple, list)):  # MNE иногда возвращает кортеж
-                start_date = datetime.fromtimestamp(start_date[0])
-
-            # Проверяем, есть ли уже такой файл в БД
-            existing_edf = self.db_manager.find_edf_by_hash(file_hash)
-            if existing_edf:
-                messagebox.showwarning("Warning",
-                                       f"EDF file {file_name} already exists in database with ID {existing_edf.id}. "
-                                       "Segments will not be added to avoid duplicates.")
-                return
-
-            # Получаем информацию о пациенте
-            subject_info = self.segmentor.raw.info.get('subject_info', {})
-            patient_name = " ".join([
-                subject_info.get('first_name', ''),
-                subject_info.get('middle_name', ''),
-                subject_info.get('last_name', '')
-            ]).strip()
-
-            birthday = subject_info.get('birthday')
-            if isinstance(birthday, str):
-                birthday = datetime.strptime(birthday, '%Y-%m-%d').date()
-
-            sex = subject_info.get('sex', 'N')
-            if sex == 1:
-                sex = 'M'
-            elif sex == 2:
-                sex = 'F'
-
-            # Находим или создаем пациента
-            patient = self.db_manager.find_patient(patient_name, birthday)
-            if not patient:
-                age = self.processor.calculate_age(birthday, start_date)
-                patient = self.db_manager.add_patient(
-                    name=patient_name,
-                    birthday=birthday,
-                    sex=sex,
-                    age=age,
-                    notes="Added automatically from EDF processing"
-                )
-                if not patient:
-                    raise Exception("Failed to add patient to database")
-
-            # Добавляем EDF файл
-            edf_file = self.db_manager.add_edf_file(
-                patient_id=patient.id,
-                file_hash=file_hash,
-                start_date=start_date,
-                eeg_channels=len(self.segmentor.raw.ch_names),
-                sampling_rate=self.segmentor.raw.info['sfreq'],
-                montage=str(self.segmentor.raw.info.get('montage', 'Unknown')),
-                notes=f"Original file: {file_name}"
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV Files", "*.csv")],
+                title=f"Export {table_name} to CSV"
             )
-            if not edf_file:
-                raise Exception("Failed to add EDF file to database")
+            if file_path:
+                data = self.db_manager.get_table_data(table_name)
+                columns = self.db_manager.get_table_columns(table_name)
 
-            # Добавляем сегменты
-            added_segments = self.db_manager.add_segments(edf_file.id, self.segmentor.seg_dict)
-            if added_segments is None:
-                raise Exception("Failed to add segments to database")
+                with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(columns)
+                    writer.writerows(data)
 
-            self.text_output.insert(tk.END,
-                                    f"Successfully added to database:\n"
-                                    f"- Patient: {patient_name} (ID: {patient.id})\n"
-                                    f"- EDF file: {file_name} (ID: {edf_file.id})\n"
-                                    f"- Segments: {len(added_segments)}\n")
-
+                messagebox.showinfo("Успех", f"Данные экспортированы в:\n{file_path}")
         except Exception as e:
-            self.text_output.insert(tk.END, f"Error filling database: {str(e)}\n")
-            messagebox.showerror("Error", f"Failed to fill database: {str(e)}")
+            messagebox.showerror("Ошибка", f"Не удалось экспортировать данные:\n{str(e)}")
 
     def edit_database(self):
-        """Open a simple interface to edit database tables."""
+        """Open database editor window."""
         if not self.db_manager:
-            messagebox.showwarning("Error", "Database not created. Please create DB first.")
+            messagebox.showwarning("Error", "Database not created. Please create database first.")
             return
 
         try:
-            edit_window = tk.Toplevel(self.root)
-            edit_window.title("Database Editor")
-            edit_window.geometry("1000x600")
-            tk.Label(edit_window, text="Select Table:").pack(pady=5)
-            tables = self.db_manager.get_tables()
-            table_var = tk.StringVar(edit_window)
-            table_var.set(tables[0] if tables else "")
-            table_menu = tk.OptionMenu(edit_window, table_var, *tables)
-            table_menu.pack(pady=5)
-            table_frame = tk.Frame(edit_window)
-            table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            canvas = tk.Canvas(table_frame)
-            scrollbar = tk.Scrollbar(table_frame, orient="vertical", command=canvas.yview)
-            scrollable_frame = tk.Frame(canvas)
-            scrollable_frame.bind(
-                "<Configure>",
-                lambda e: canvas.configure(
-                    scrollregion=canvas.bbox("all")
-                )
-            )
+            # Create editor window
+            editor = tk.Toplevel(self.root)
+            editor.title("Database Editor")
+            editor.geometry("1200x600")
 
-            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-            canvas.configure(yscrollcommand=scrollbar.set)
+            # Add tabs for each table
+            notebook = ttk.Notebook(editor)
 
-            canvas.pack(side="left", fill="both", expand=True)
-            scrollbar.pack(side="right", fill="y")
+            tables = ["patients", "edf_files", "segments", "diagnosis"]
+            for table in tables:
+                frame = ttk.Frame(notebook)
+                notebook.add(frame, text=table.capitalize())
 
-            def load_table_data():
-                selected_table = table_var.get()
-                if not selected_table:
-                    return
+                # Add Treeview to display table data
+                columns = self.db_manager.get_table_columns(table)
+                data = self.db_manager.get_table_data(table)
 
-                columns, data = self.db_manager.get_table_data(selected_table)
-                for widget in scrollable_frame.winfo_children():
-                    widget.destroy()
-                for col_idx, col_name in enumerate(columns):
-                    tk.Label(scrollable_frame, text=col_name, relief=tk.RIDGE,
-                             width=20, font=('Arial', 10, 'bold')).grid(
-                        row=0, column=col_idx, sticky="nsew")
-                for row_idx, row in enumerate(data, start=1):
-                    for col_idx, value in enumerate(row):
-                        tk.Label(scrollable_frame, text=str(value), relief=tk.GROOVE,
-                                 width=20).grid(row=row_idx, column=col_idx, sticky="nsew")
-                for i in range(len(columns)):
-                    scrollable_frame.columnconfigure(i, weight=1)
+                tree = ttk.Treeview(frame, columns=columns, show="headings")
+                for col in columns:
+                    tree.heading(col, text=col)
+                    tree.column(col, width=100)
 
-            tk.Button(edit_window, text="Load Table", command=load_table_data).pack(pady=5)
-            def open_sql_editor():
-                sql_window = tk.Toplevel(edit_window)
-                sql_window.title("SQL Editor")
-                sql_window.geometry("800x500")
-                tk.Label(sql_window, text="Enter SQL Query:").pack(pady=5)
-                sql_text = tk.Text(sql_window, height=10, width=100)
-                sql_text.pack(pady=5, fill=tk.BOTH, expand=True)
-                result_text = tk.Text(sql_window, height=15, width=100)
-                result_text.pack(pady=5, fill=tk.BOTH, expand=True)
+                for row in data:
+                    tree.insert("", tk.END, values=row)
 
-                def execute_query():
-                    query = sql_text.get("1.0", tk.END).strip()
-                    if not query:
-                        return
+                scroll_y = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+                scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+                tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
 
-                    success, result, data = self.db_manager.execute_query(query)
-                    result_text.delete("1.0", tk.END)
-                    if success:
-                        if result:  # SELECT query
-                            columns = result
-                            rows = data
-                            result_text.insert(tk.END, " | ".join(columns) + "\n")
-                            result_text.insert(tk.END,
-                                               "-" * (sum(len(col) for col in columns) + 3 * len(columns)) + "\n")
-                            for row in rows:
-                                result_text.insert(tk.END, " | ".join(str(val) for val in row) + "\n")
-                        else:  # Non-SELECT query
-                            result_text.insert(tk.END, f"Query executed successfully. Rows affected: {data}")
-                    else:
-                        result_text.insert(tk.END, f"Error executing query: {result}")
+                tree.pack(side="left", fill="both", expand=True)
+                scroll_y.pack(side="right", fill="y")
+                scroll_x.pack(side="bottom", fill="x")
 
-                tk.Button(sql_window, text="Execute", command=execute_query).pack(pady=5)
-
-            tk.Button(edit_window, text="SQL Editor", command=open_sql_editor).pack(pady=5)
+            notebook.pack(fill="both", expand=True)
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to open database editor: {str(e)}")
+            messagebox.showerror("Error", f"Failed to open editor: {str(e)}")
 
+    def create_database(self):
+        """Создать новую базу данных в папке DB."""
+        try:
+            if not self.directory:
+                messagebox.showwarning("Ошибка", "Сначала выберите рабочую папку")
+                return
+
+            db_folder = os.path.join(self.directory, "DB")
+            db_path = os.path.join(db_folder, "eeg_database.db")
+
+            # Создаем папку DB если не существует
+            os.makedirs(db_folder, exist_ok=True)
+
+            # Проверяем существование БД
+            if os.path.exists(db_path):
+                if not messagebox.askyesno("Подтверждение",
+                                           "База данных уже существует. Пересоздать?"):
+                    self.text_output.insert(tk.END, "Используется существующая БД\n")
+                    return
+
+            self.db_manager = DBManager(self.directory)
+
+            if not self.db_manager.database_exists():
+                raise RuntimeError("Не удалось создать файл БД")
+
+            self.text_output.insert(tk.END, f"База данных создана в:\n{db_path}\n")
+            self._enable_db_buttons()
+            self._update_db_status()
+
+        except Exception as e:
+            error_msg = f"Error creating database: {str(e)}"
+            self.text_output.insert(tk.END, error_msg + "\n")
+            messagebox.showerror("Database Error", error_msg)
+            if hasattr(self, 'db_manager'):
+                del self.db_manager
+
+    def _enable_db_buttons(self):
+        """Активировать кнопки работы с базой данных."""
+        db_buttons = ["Fill", "Stats", "Edit"]  # Сокращенные названия кнопок из _setup_ui
+        for btn in self.button_frame.winfo_children():
+            if isinstance(btn, tk.Button) and btn["text"] in db_buttons:
+                btn.config(state=tk.NORMAL)
+
+    def _update_db_status(self):
+        """Обновить статус базы данных в интерфейсе."""
+        if hasattr(self, 'db_manager') and self.db_manager:
+            db_name = os.path.basename(self.db_manager.db_path)
+            size = os.path.getsize(self.db_manager.db_path) / 1024  # Размер в KB
+            self.db_status_label.config(
+                text=f"DB: {db_name} ({size:.1f} KB)",
+                fg="green",
+                font=("Arial", 9, "bold")
+            )
+
+    def show_db_stats(self):
+        """Показать статистику базы данных с очисткой экрана."""
+        self.text_output.delete(1.0, tk.END)  # Очищаем экран
+
+        if not hasattr(self, 'db_manager') or not self.db_manager:
+            self.text_output.insert(tk.END, "Database not initialized. Please create database first.\n")
+            return
+
+        try:
+            stats = self.db_manager.get_database_stats()
+
+            # Форматированный вывод статистики
+            self.text_output.insert(tk.END, "=== DATABASE STATISTICS ===\n")
+            self.text_output.insert(tk.END, f"Location: {self.db_manager.db_path}\n\n")
+
+            self.text_output.insert(tk.END, "Records Count:\n")
+            self.text_output.insert(tk.END, f"- Patients: {stats['patients']}\n")
+            self.text_output.insert(tk.END, f"- EDF Files: {stats['edf_files']}\n")
+            self.text_output.insert(tk.END, f"- Segments: {stats['segments']}\n")
+            self.text_output.insert(tk.END, f"- Diagnoses: {stats['diagnoses']}\n\n")
+
+            # Добавляем информацию о последних записях
+            self.text_output.insert(tk.END, "Last Added:\n")
+            try:
+                last_patient = self.db_manager.get_last_record("patients")
+                last_edf = self.db_manager.get_last_record("edf_files")
+
+                self.text_output.insert(tk.END, f"- Last Patient: {last_patient[1]} (ID: {last_patient[0]})\n")
+                self.text_output.insert(tk.END, f"- Last EDF File: {last_edf[0]} (Channels: {last_edf[4]})\n")
+            except Exception as e:
+                self.text_output.insert(tk.END, f"- Additional info unavailable: {str(e)}\n")
+
+        except Exception as e:
+            error_msg = f"Error retrieving database stats: {str(e)}"
+            self.text_output.insert(tk.END, error_msg + "\n")
+            messagebox.showerror("Database Error", error_msg)
+
+    def fill_segments(self):
+        """Заполнить базу данных сегментами из текущего словаря."""
+        if not self.segmentor or not self.segmentor.seg_dict:
+            messagebox.showwarning("Error", "No segments available to add to database.")
+            return
+
+        if not self.db_manager:
+            messagebox.showwarning("Error", "Database not created. Please create database first.")
+            return
+
+        try:
+            # Получить путь к EDF файлу (нужно добавить этот функционал в EDFSegmentor)
+            file_path = getattr(self.segmentor, 'current_file_path', None)
+            if not file_path:
+                file_path = filedialog.askopenfilename(filetypes=[("EDF files", "*.edf")])
+                if not file_path:
+                    return
+
+            patient_id, edf_id = self.db_manager.fill_segments_from_dict(
+                self.segmentor.seg_dict,
+                file_path
+            )
+
+            self.text_output.insert(tk.END,
+                                    f"Successfully added segments to database. Patient ID: {patient_id}, EDF ID: {edf_id}\n")
+            self._show_db_stats()
+
+        except ValueError as e:
+            self.text_output.insert(tk.END, f"Error adding segments: {e}\n")
+            messagebox.showerror("Error", str(e))
+        except Exception as e:
+            self.text_output.insert(tk.END, f"Unexpected error: {e}\n")
+            messagebox.showerror("Error", f"Failed to add segments: {e}")
+
+    def _show_db_stats(self):
+        """Показать статистику базы данных."""
+        if not self.db_manager:
+            self.text_output.insert(tk.END, "Database not initialized.\n")
+            return
+
+        try:
+            stats = self.db_manager.get_database_stats()
+            self.text_output.insert(tk.END, "Database Statistics:\n")
+            self.text_output.insert(tk.END, f"Patients: {stats['patients']}\n")
+            self.text_output.insert(tk.END, f"EDF Files: {stats['edf_files']}\n")
+            self.text_output.insert(tk.END, f"Segments: {stats['segments']}\n")
+            self.text_output.insert(tk.END, f"Diagnoses: {stats['diagnoses']}\n")
+        except Exception as e:
+            self.text_output.insert(tk.END, f"Error getting database stats: {e}\n")
 
     def apply_min_duration(self):
         """Apply the minimum segment duration from the entry field."""
@@ -428,15 +535,8 @@ class EDFApp:
         if self.directory:
             self.text_output.insert(tk.END, f"Selected directory: {self.directory}\n")
             self.processor = EDFProcessor(self.directory)
-
-            # Пытаемся автоматически загрузить БД, если она существует
-            db_path = os.path.join(self.directory, "DB", "eeg_database.db")
-            if os.path.exists(db_path):
-                self.load_database()
-
-            # Активируем остальные кнопки
             for btn in self.button_frame.winfo_children():
-                if isinstance(btn, tk.Button) and btn["text"] not in ["Open Folder", "Load DB"]:
+                if isinstance(btn, tk.Button) and btn["text"] != "Open Folder":
                     btn.config(state=tk.NORMAL)
 
     def load_edf_file(self):
@@ -444,10 +544,16 @@ class EDFApp:
         file_path = filedialog.askopenfilename(filetypes=[("EDF files", "*.edf")])
         if file_path:
             self.segmentor = EDFSegmentor(self.text_output)
+            self.segmentor.current_file_path = file_path  # Сохраняем путь к файлу
             self.segmentor.load_metadata(file_path)
             for btn in self.button_frame.winfo_children():
                 if isinstance(btn, tk.Button) and btn["text"] == "Split into Segments":
                     btn.config(state=tk.NORMAL)
+            # Активировать кнопку Fill Segments если БД создана
+            if self.db_manager:
+                for btn in self.button_frame.winfo_children():
+                    if isinstance(btn, tk.Button) and btn["text"] == "Fill Segments":
+                        btn.config(state=tk.NORMAL)
 
     def _execute_operation(self, operation_name, operation_func):
         """Execute an operation with error handling."""
