@@ -6,17 +6,57 @@ from config.settings import settings
 import numpy as np
 from tabulate import tabulate
 import tkinter as tk
+import re
 
 class EventProcessor:
     """Handler for generating event names and processing events."""
+
+    @staticmethod
+    def _clean_event_name(name):
+        """Cleans event name: removes brackets/parentheses, checks excluded names, translates to English."""
+        cleaned_name = re.sub(r'\[.*?\]|\(.*?\)', '', name).strip()
+        excluded_names = ["stimFlash", "Артефакт", "Начало печати", "Окончание печати"]
+        if cleaned_name in excluded_names or name in excluded_names:
+            return None
+        if not cleaned_name:
+            return name if name else "Unknown"
+        translations = {
+            "Фоновая запись": "Baseline",
+            "Открывание глаз": "EyesOpen",
+            "Закрывание глаз": "EyesClosed",
+            "Без стимуляции": "Rest",
+            "Фотостимуляция": "PhoticStim",
+            "После фотостимуляции": "PostPhotic",
+            "Встроенный фотостимулятор": "Photic",
+            "Встроенный слуховой стимулятор": "Auditory",
+            "Остановка стимуляции": "StimOff",
+            "Гипервентиляция": "Hypervent",
+            "После гипервентиляции": "PostHypervent",
+            "Разрыв записи": "Gap"
+        }
+        for ru_name, en_name in translations.items():
+            if ru_name in cleaned_name:
+                if "Photic" in en_name or "Auditory" in en_name:
+                    freq_match = re.search(r'(\d+)\s*Гц', name)
+                    tone_match = re.search(r'Тон\s*(\d+)\s*Гц', name)
+                    if tone_match:
+                        return f"{en_name}{tone_match.group(1)}Hz"
+                    elif freq_match:
+                        return f"{en_name}{freq_match.group(1)}Hz"
+                return en_name
+        return cleaned_name
+
     @staticmethod
     def get_event_name(evt_code, ev_id):
         """Returns the event name based on its code."""
-        return next((name for name, code in ev_id.items() if code == evt_code), "Unknown")
+        name = next((name for name, code in ev_id.items() if code == evt_code), "Unknown")
+        return EventProcessor._clean_event_name(name)
 
     @staticmethod
     def generate_segment_name(base_name, existing_names):
         """Generates a unique name for a segment."""
+        if base_name is None:
+            base_name = "Unknown"
         seg_name = base_name
         counter = 1
         while seg_name in existing_names:
@@ -101,10 +141,50 @@ class EDFSegmentor:
             time_index = self.events[s_idx, 0]
             event_id_value = self.events[s_idx, 2]
             evt_name = EventProcessor.get_event_name(event_id_value, self.event_id)
+            if evt_name is None:
+                continue
             time_seconds = time_index / self.raw.info['sfreq']
             table_data.append([f"{time_seconds:.2f}", event_id_value, evt_name])
         headers = ["Time (sec)", "Event ID", "Description"]
-        return f"\nNumber of events: {len(self.events)}\nEvent List:\n{tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
+        excluded_events_note = " (excluding stimFlash, Артефакт, Начало печати, Окончание печати)"
+        return f"\nNumber of events: {len(self.events)}\nEvent List{excluded_events_note}:\n{tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
+
+    def process(self):
+        """Processes the EDF file, splitting it into segments without missing intervals."""
+        self.output_widget.delete(1.0, tk.END)
+        if self.raw is None:
+            self.output_widget.insert(tk.END, "Error: Please select an EDF file for processing first.\n")
+            raise Exception("Please select an EDF file for processing first.")
+
+        self.output_widget.insert(tk.END, "Starting processing...\n")
+        if len(self.events) < 1:
+            self.output_widget.insert(tk.END, "No events found in the file.\n")
+            return
+        valid_indices = []
+        for i, event in enumerate(self.events):
+            evt_code = event[2]
+            evt_name = EventProcessor.get_event_name(evt_code, self.event_id)
+            if evt_name is not None:
+                valid_indices.append(i)
+        if not valid_indices:
+            self.output_widget.insert(tk.END, "No valid events found after filtering.\n")
+            return
+        first_event_time = self.events[valid_indices[0], 0] / self.raw.info['sfreq']
+        if first_event_time > settings.MIN_SEGMENT_DURATION:
+            seg_name = EventProcessor.generate_segment_name("Start", self.seg_dict.keys())
+            seg_data = self.raw.copy().crop(tmin=0, tmax=first_event_time)
+            self.seg_dict[seg_name] = {
+                'start_time': 0,
+                'end_time': first_event_time,
+                'current_event': "Start",
+                'next_event': EventProcessor.get_event_name(self.events[valid_indices[0], 2], self.event_id),
+                'data': seg_data
+            }
+        for i in range(len(valid_indices)):
+            current_idx = valid_indices[i]
+            next_idx = valid_indices[i + 1] if i + 1 < len(valid_indices) else None
+            self.add_seg(current_idx, next_idx)
+        self._output_results()
 
     def add_seg(self, s_idx, e_idx):
         """Adds a segment to the segment dictionary."""
@@ -124,21 +204,6 @@ class EDFSegmentor:
             'next_event': next_evt,
             'data': seg_data
         }
-
-    def process(self):
-        """Processes the EDF file, splitting it into segments."""
-        self.output_widget.delete(1.0, tk.END)
-        if self.raw is None:
-            self.output_widget.insert(tk.END, "Error: Please select an EDF file for processing first.\n")
-            raise Exception("Please select an EDF file for processing first.")
-        self.output_widget.insert(tk.END, "Starting processing...\n")
-        if len(self.events) < 2:
-            self.output_widget.insert(tk.END, "Insufficient events to extract segments.\n")
-            return
-        for i in range(len(self.events) - 1):
-            self.add_seg(i, i + 1)
-        self.add_seg(len(self.events) - 1, None)
-        self._output_results()
 
     def _output_results(self):
         """Outputs the processing results to the text widget."""
@@ -172,3 +237,26 @@ class EDFSegmentor:
         self.output_widget.insert(tk.END, f"Number of segments with duration >= {settings.MIN_SEGMENT_DURATION} sec: {valid_segments_count}\n")
         self.output_widget.insert(tk.END, "Segment Data:\n")
         self.output_widget.insert(tk.END, tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT) + "\n")
+
+    @staticmethod
+    def get_event_name(evt_code, ev_id):
+        """Returns the translated and shortened event name based on its code."""
+        name = next((name for name, code in ev_id.items() if code == evt_code), "Unknown")
+        return EventProcessor._clean_event_name(name)
+
+    @staticmethod
+    def generate_segment_name(base_name, existing_names):
+        """Generates a unique short name for a segment."""
+        if base_name is None:
+            base_name = "Unknown"
+
+        # Create short version (take first 5 letters if long)
+        short_name = base_name[:8] if len(base_name) > 8 else base_name
+
+        # Ensure uniqueness
+        seg_name = short_name
+        counter = 1
+        while seg_name in existing_names:
+            seg_name = f"{short_name[:5]}_{counter}"
+            counter += 1
+        return seg_name

@@ -224,33 +224,172 @@ class EDFApp:
         if not self.db_manager:
             messagebox.showwarning("Error", "Database not created. Please create database first.")
             return
+        editor = tk.Toplevel(self.root)
+        editor.title("Database Editor")
+        editor.geometry("1200x600")
+        notebook = ttk.Notebook(editor)
+        self._create_table_viewer_tab(notebook)
+        self._create_sql_editor_tab(notebook)
+        notebook.pack(fill="both", expand=True)
+
+    def _load_table_data(self, event):
+        """Load selected table data"""
+        selection = self.table_listbox.curselection()
+        if not selection:
+            return
+        table_name = self.table_listbox.get(selection[0])
+        for widget in self.table_data_frame.winfo_children():
+            widget.destroy()
         try:
-            # Create editor window
-            editor = tk.Toplevel(self.root)
-            editor.title("Database Editor")
-            editor.geometry("1200x600")
-            notebook = ttk.Notebook(editor)
-            tables = ["patients", "edf_files", "segments", "diagnosis"]
-            for table in tables:
-                frame = ttk.Frame(notebook)
-                notebook.add(frame, text=table.capitalize())
-                columns = self.db_manager.get_table_columns(table)
-                data = self.db_manager.get_table_data(table)
-                tree = ttk.Treeview(frame, columns=columns, show="headings")
-                for col in columns:
-                    tree.heading(col, text=col)
-                    tree.column(col, width=100)
-                for row in data:
-                    tree.insert("", tk.END, values=row)
-                scroll_y = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-                scroll_x = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
-                tree.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-                tree.pack(side="left", fill="both", expand=True)
-                scroll_y.pack(side="right", fill="y")
-                scroll_x.pack(side="bottom", fill="x")
-            notebook.pack(fill="both", expand=True)
+            columns = self.db_manager.get_table_columns(table_name)
+            data = self.db_manager.get_table_data(table_name)
+            tree = ttk.Treeview(self.table_data_frame, columns=columns, show="headings")
+            for col in columns:
+                tree.heading(col, text=col)
+                tree.column(col, width=100, anchor=tk.W)
+            for row in data:
+                tree.insert("", tk.END, values=row)
+            scroll_y = ttk.Scrollbar(self.table_data_frame, orient="vertical", command=tree.yview)
+            scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+            tree.configure(yscrollcommand=scroll_y.set)
+            scroll_x = ttk.Scrollbar(self.table_data_frame, orient="horizontal", command=tree.xview)
+            scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+            tree.configure(xscrollcommand=scroll_x.set)
+            tree.pack(fill=tk.BOTH, expand=True)
+            tk.Label(self.table_data_frame,
+                     text=f"Loaded {len(data)} rows from table '{table_name}'",
+                     font=('Arial', 8)).pack(side=tk.BOTTOM)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to open editor: {str(e)}")
+            messagebox.showerror("Error", f"Failed to load table data: {str(e)}")
+
+    def _execute_sql(self):
+        """Execute SQL query from editor"""
+        query = self.sql_input.get("1.0", tk.END).strip()
+        if not query:
+            messagebox.showwarning("Warning", "Please enter a SQL query")
+            return
+        try:
+            cursor = self.db_manager.conn.cursor()
+            cursor.execute(query)
+            for row in self.sql_results.get_children():
+                self.sql_results.delete(row)
+            self.sql_results["columns"] = []
+            if query.lower().strip().startswith(("select", "pragma", "explain")):
+                # For SELECT queries - show results in table
+                columns = [desc[0] for desc in cursor.description]
+                self.sql_results["columns"] = columns
+                for col in columns:
+                    self.sql_results.heading(col, text=col)
+                    self.sql_results.column(col, width=100)
+                for row in cursor.fetchall():
+                    self.sql_results.insert("", tk.END, values=row)
+                messagebox.showinfo("Success", f"Query executed. Returned {len(self.sql_results.get_children())} rows")
+            else:
+                self.db_manager.conn.commit()
+                messagebox.showinfo("Success", f"Query executed. Rows affected: {cursor.rowcount}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to execute query:\n{str(e)}")
+
+    def _run_quick_query(self, query_template):
+        """Run predefined quick query"""
+        selection = self.table_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a table first")
+            return
+
+        table_name = self.table_listbox.get(selection[0])
+        query = query_template.format(table=table_name)
+        self.sql_input.delete("1.0", tk.END)
+        self.sql_input.insert("1.0", query)
+        if hasattr(self, 'notebook'):
+            self.notebook.select(1)  # Switch to SQL tab
+
+    def _clear_sql(self):
+        """Clear SQL query editor"""
+        self.sql_input.delete("1.0", tk.END)
+
+    def _save_query(self):
+        """Save current query to file"""
+        query = self.sql_input.get("1.0", tk.END).strip()
+        if not query:
+            messagebox.showwarning("Warning", "No query to save")
+            return
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".sql",
+            filetypes=[("SQL Files", "*.sql"), ("All Files", "*.*")],
+            title="Save SQL Query"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'w') as f:
+                    f.write(query)
+                messagebox.showinfo("Success", "Query saved successfully")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save query: {str(e)}")
+
+    def _load_query(self):
+        """Load SQL query from file"""
+        file_path = filedialog.askopenfilename(
+            filetypes=[("SQL Files", "*.sql"), ("All Files", "*.*")],
+            title="Load SQL Query"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    query = f.read()
+                self.sql_input.delete("1.0", tk.END)
+                self.sql_input.insert("1.0", query)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load query: {str(e)}")
+
+    def _create_table_viewer_tab(self, notebook):
+        """Create tab with table selection and viewing"""
+        table_frame = ttk.Frame(notebook)
+        notebook.add(table_frame, text="Tables")
+        list_frame = ttk.Frame(table_frame, width=200)
+        list_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        tk.Label(list_frame, text="Database Tables", font=('Arial', 10, 'bold')).pack()
+        self.table_listbox = tk.Listbox(list_frame)
+        self.table_listbox.pack(fill=tk.BOTH, expand=True, pady=5)
+        for table in ["patients", "edf_files", "segments", "diagnosis"]:
+            self.table_listbox.insert(tk.END, table)
+        self.table_listbox.bind('<<ListboxSelect>>', self._load_table_data)
+        self.table_data_frame = ttk.Frame(table_frame)
+        self.table_data_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    def _create_sql_editor_tab(self, notebook):
+        """Create tab with SQL query editor"""
+        sql_frame = ttk.Frame(notebook)
+        notebook.add(sql_frame, text="SQL Query")
+
+        # SQL input area
+        tk.Label(sql_frame, text="SQL Query:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
+
+        self.sql_input = scrolledtext.ScrolledText(sql_frame, wrap=tk.WORD, height=8)
+        self.sql_input.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Button frame
+        btn_frame = ttk.Frame(sql_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Button(btn_frame, text="Execute", command=self._execute_sql).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Clear", command=self._clear_sql).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Save Query", command=self._save_query).pack(side=tk.RIGHT)
+        ttk.Button(btn_frame, text="Load Query", command=self._load_query).pack(side=tk.RIGHT)
+
+        # Results area
+        tk.Label(sql_frame, text="Results:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
+
+        self.sql_results = ttk.Treeview(sql_frame)
+        self.sql_results.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        scroll_y = ttk.Scrollbar(sql_frame, orient="vertical", command=self.sql_results.yview)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.sql_results.configure(yscrollcommand=scroll_y.set)
+
+        scroll_x = ttk.Scrollbar(sql_frame, orient="horizontal", command=self.sql_results.xview)
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.sql_results.configure(xscrollcommand=scroll_x.set)
 
     def create_database(self):
         """Создать новую базу данных в папке DB."""
@@ -335,7 +474,6 @@ class EDFApp:
             messagebox.showwarning("Error", "Database not created. Please create database first.")
             return
         try:
-            # Получить путь к EDF файлу (нужно добавить этот функционал в EDFSegmentor)
             file_path = getattr(self.segmentor, 'current_file_path', None)
             if not file_path:
                 file_path = filedialog.askopenfilename(filetypes=[("EDF files", "*.edf")])
