@@ -22,7 +22,6 @@ class EDFApp:
         self.processor = None
         self.segmentor = None
         self.db_manager = None
-        self._try_autoload_db()
         self._setup_ui()
 
     def _try_autoload_db(self):
@@ -37,6 +36,10 @@ class EDFApp:
                 self._enable_db_buttons()
                 self._update_db_status()
                 self.text_output.insert(tk.END, "Automatically loaded existing database\n")
+                if hasattr(self, 'segmentor') and self.segmentor and hasattr(self.segmentor, 'current_file_path'):
+                    for btn in self.button_frame.winfo_children():
+                        if isinstance(btn, tk.Button) and btn["text"] == "Fill":
+                            btn.config(state=tk.NORMAL)
             except Exception as e:
                 self.text_output.insert(tk.END, f"Error loading database: {str(e)}\n")
 
@@ -103,7 +106,7 @@ class EDFApp:
             .grid(row=2, column=0, padx=5, pady=5, sticky="w")
 
         db_buttons = [
-            ("Load/Create", self.create_database, "Create new database"),
+            ("Create", self.create_database, "Create new database"),
             ("Fill", self.fill_segments, "Fill with segments"),
             ("Stats", self.show_db_stats, "Show statistics"),
             ("Edit", self.edit_database, "View/edit tables"),
@@ -536,8 +539,9 @@ class EDFApp:
             self.text_output.insert(tk.END, f"Selected directory: {self.directory}\n")
             self.processor = EDFProcessor(self.directory)
             for btn in self.button_frame.winfo_children():
-                if isinstance(btn, tk.Button) and btn["text"] != "Open Folder":
+                if isinstance(btn, tk.Button) and btn["text"] != "Open":
                     btn.config(state=tk.NORMAL)
+            self._try_autoload_db()
 
     def load_edf_file(self):
         """Load an EDF file for segmentation."""
