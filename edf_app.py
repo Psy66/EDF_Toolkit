@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 class EDFApp:
     def __init__(self, root):
+        super().__init__()
         self.root = root
         self.root.title("EDF File Manager")
         self.root.geometry("1700x700")
@@ -109,6 +110,83 @@ class EDFApp:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
+
+        self.btn_batch_process = tk.Button(
+            self.button_frame,
+            text="Batch Process",
+            command=self.batch_process_edf_files,
+            state=tk.DISABLED
+        )
+        self.btn_batch_process.grid(row=1, column=6, padx=2, pady=5, sticky="ew")
+        self._create_tooltip(self.btn_batch_process, "Process all EDF files in folder and save segments to DB")
+
+    def batch_process_edf_files(self):
+        """Обработать все EDF файлы в папке и сохранить сегменты в базу данных"""
+        if not self.directory:
+            messagebox.showwarning("Ошибка", "Сначала выберите рабочую папку")
+            return
+
+        if not hasattr(self, 'db_manager') or not self.db_manager:
+            messagebox.showwarning("Ошибка", "Сначала создайте базу данных")
+            return
+
+        # Получаем список всех EDF файлов в папке
+        edf_files = [f for f in os.listdir(self.directory) if f.lower().endswith('.edf')]
+        if not edf_files:
+            messagebox.showinfo("Информация", "В выбранной папке нет EDF файлов")
+            return
+
+        self.text_output.delete(1.0, tk.END)
+        self.text_output.insert(tk.END, f"Начинаем пакетную обработку {len(edf_files)} файлов...\n")
+
+        total_segments = 0
+        processed_files = 0
+
+        for edf_file in edf_files:
+            try:
+                file_path = os.path.join(self.directory, edf_file)
+                self.text_output.insert(tk.END, f"\nОбработка файла: {edf_file}\n")
+                self.text_output.update_idletasks()
+
+                # Создаем сегментатор и загружаем файл
+                segmentor = EDFSegmentor(self.text_output)
+                segmentor.load_metadata(file_path)
+                segmentor.process()
+
+                # Добавляем сегменты в базу данных
+                if segmentor.seg_dict:
+                    try:
+                        patient_id, edf_id = self.db_manager.fill_segments_from_dict(
+                            segmentor.seg_dict,
+                            file_path
+                        )
+                        segments_added = len(segmentor.seg_dict)
+                        total_segments += segments_added
+                        self.text_output.insert(
+                            tk.END,
+                            f"Добавлено {segments_added} сегментов в БД (Patient ID: {patient_id}, EDF ID: {edf_id})\n"
+                        )
+                        processed_files += 1
+                    except ValueError as e:
+                        self.text_output.insert(tk.END, f"Ошибка добавления в БД: {str(e)}\n")
+                else:
+                    self.text_output.insert(tk.END, "Файл не содержит сегментов для добавления\n")
+
+            except Exception as e:
+                self.text_output.insert(tk.END, f"Ошибка обработки файла {edf_file}: {str(e)}\n")
+                logging.error(f"Error processing {edf_file}: {e}")
+                continue
+
+        # Показываем итоговую статистику
+        self.text_output.insert(
+            tk.END,
+            f"\nПакетная обработка завершена!\n"
+            f"Обработано файлов: {processed_files}/{len(edf_files)}\n"
+            f"Всего добавлено сегментов: {total_segments}\n"
+        )
+
+        # Обновляем статус базы данных
+        self._update_db_status()
 
     def _display_table(self, parent, table_name):
         """Отобразить содержимое таблицы с возможностью сортировки и контекстного меню."""
@@ -361,32 +439,21 @@ class EDFApp:
         """Create tab with SQL query editor"""
         sql_frame = ttk.Frame(notebook)
         notebook.add(sql_frame, text="SQL Query")
-
-        # SQL input area
         tk.Label(sql_frame, text="SQL Query:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
-
         self.sql_input = scrolledtext.ScrolledText(sql_frame, wrap=tk.WORD, height=8)
         self.sql_input.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # Button frame
         btn_frame = ttk.Frame(sql_frame)
         btn_frame.pack(fill=tk.X, padx=5, pady=5)
-
         ttk.Button(btn_frame, text="Execute", command=self._execute_sql).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="Clear", command=self._clear_sql).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="Save Query", command=self._save_query).pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text="Load Query", command=self._load_query).pack(side=tk.RIGHT)
-
-        # Results area
         tk.Label(sql_frame, text="Results:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
-
         self.sql_results = ttk.Treeview(sql_frame)
         self.sql_results.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
         scroll_y = ttk.Scrollbar(sql_frame, orient="vertical", command=self.sql_results.yview)
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.sql_results.configure(yscrollcommand=scroll_y.set)
-
         scroll_x = ttk.Scrollbar(sql_frame, orient="horizontal", command=self.sql_results.xview)
         scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         self.sql_results.configure(xscrollcommand=scroll_x.set)
@@ -411,6 +478,8 @@ class EDFApp:
             self.text_output.insert(tk.END, f"База данных создана в:\n{db_path}\n")
             self._enable_db_buttons()
             self._update_db_status()
+            if not any(f.lower().endswith('.edf') for f in os.listdir(self.directory)):
+                messagebox.showwarning("Предупреждение", "В выбранной папке нет EDF файлов")
 
         except Exception as e:
             error_msg = f"Error creating database: {str(e)}"
@@ -582,6 +651,7 @@ class EDFApp:
                 if isinstance(btn, tk.Button) and btn["text"] != "Open":
                     btn.config(state=tk.NORMAL)
             self._try_autoload_db()
+            self.btn_batch_process.config(state=tk.NORMAL)
 
     def load_edf_file(self):
         """Load an EDF file for segmentation."""

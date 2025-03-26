@@ -154,9 +154,7 @@ class DBManager:
         return os.path.exists(self.db_path)
 
     def add_patient(self, name: str, sex: str, age: int, note: str = "") -> int:
-        """
-        Add a new patient to the database or return existing patient_id if patient already exists.
-        """
+        """Add a new patient to the database or return existing patient_id if patient already exists."""
         # Check if patient already exists
         cursor = self.conn.cursor()
         cursor.execute("SELECT patient_id FROM patients WHERE name = ?", (name,))
@@ -178,9 +176,7 @@ class DBManager:
 
     def add_edf_file(self, patient_id: int, file_hash: str, start_date: float,
                      eeg_ch: int, rate: float, montage: str = "", notes: str = "") -> int:
-        """
-        Add a new EDF file to the database.
-        """
+        """Add a new EDF file to the database."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT edf_id FROM edf_files WHERE file_hash = ?", (file_hash,))
         result = cursor.fetchone()
