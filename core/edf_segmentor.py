@@ -14,8 +14,9 @@ class EventProcessor:
     @staticmethod
     def _clean_event_name(name):
         """Cleans event name: removes brackets/parentheses, checks excluded names, translates to English."""
+        global excluded_names
         cleaned_name = re.sub(r'\[.*?\]|\(.*?\)', '', name).strip()
-        excluded_names = ["stimFlash", "Артефакт", "Начало печати", "Окончание печати"]
+        excluded_names = ["stimFlash", "Артефакт", "Начало печати", "Окончание печати", "Эпилептиформная активность", '''Комплекс "острая волна - медленная волна"''']
         if cleaned_name in excluded_names or name in excluded_names:
             return None
         if not cleaned_name:
@@ -32,7 +33,8 @@ class EventProcessor:
             "Остановка стимуляции": "StimOff",
             "Гипервентиляция": "Hypervent",
             "После гипервентиляции": "PostHypervent",
-            "Разрыв записи": "Gap"
+            "Разрыв записи": "Gap",
+            "Бодрствование": "Awake"
         }
         for ru_name, en_name in translations.items():
             if ru_name in cleaned_name:
@@ -146,7 +148,7 @@ class EDFSegmentor:
             time_seconds = time_index / self.raw.info['sfreq']
             table_data.append([f"{time_seconds:.2f}", event_id_value, evt_name])
         headers = ["Time (sec)", "Event ID", "Description"]
-        excluded_events_note = " (excluding stimFlash, Артефакт, Начало печати, Окончание печати)"
+        excluded_events_note = excluded_names
         return f"\nNumber of events: {len(self.events)}\nEvent List{excluded_events_note}:\n{tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
 
     def process(self):

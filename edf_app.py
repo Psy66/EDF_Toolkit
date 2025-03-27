@@ -58,7 +58,7 @@ class EDFApp:
             ("Check", self.check_corrupted, "Check for corrupted files"),
             ("Dupes", self.find_duplicates, "Find and delete duplicates"),
             ("Similar", self.find_similar_time, "Find files with similar times"),
-            ("Stats", self.generate_stats, "Generate statistics"),
+            ("EDF Stats", self.generate_stats, "Generate statistics"),
             ("Patients", self.generate_patient_table, "Create patient table"),
             ("Random", self.randomize_filenames, "Randomize filenames"),
             ("Anonym", self.remove_patient_info, "Remove patient info"),
@@ -91,7 +91,7 @@ class EDFApp:
         db_buttons = [
             ("Create", self.create_database, "Create new database"),
             ("Fill", self.fill_segments, "Fill with segments"),
-            ("Stats", self.show_db_stats, "Show statistics"),
+            ("DB Stats", self.show_db_stats, "Show statistics"),
             ("Edit", self.edit_database, "View/edit tables"),
         ]
         for idx, (text, command, tooltip) in enumerate(db_buttons):
@@ -113,7 +113,7 @@ class EDFApp:
 
         self.btn_batch_process = tk.Button(
             self.button_frame,
-            text="Batch Process",
+            text="All split & Fill",
             command=self.batch_process_edf_files,
             state=tk.DISABLED
         )
