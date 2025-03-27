@@ -133,8 +133,8 @@ At the bottom of the interface, there is an output field where the results of op
 ---
 
 ## 📂 Project Structure
-
-EDF_Toolkit/
+```
+EDF_Toolkit
 ├── config/
 │   └── settings.py          # Application settings
 ├── core/
@@ -146,7 +146,7 @@ EDF_Toolkit/
 ├── edf_app.py               # Main application module
 ├── README.md                # Project documentation
 └── requirements.txt         # Dependencies
-
+```
 ---
 
 ## 🛠️ Technical Details
