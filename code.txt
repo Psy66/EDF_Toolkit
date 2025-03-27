@@ -6,6 +6,7 @@ class Settings:
 
 settings = Settings()
 
+
 # core/db_manager.py
 import os
 import sqlite3
@@ -162,9 +163,7 @@ class DBManager:
         return os.path.exists(self.db_path)
 
     def add_patient(self, name: str, sex: str, age: int, note: str = "") -> int:
-        """
-        Add a new patient to the database or return existing patient_id if patient already exists.
-        """
+        """Add a new patient to the database or return existing patient_id if patient already exists."""
         # Check if patient already exists
         cursor = self.conn.cursor()
         cursor.execute("SELECT patient_id FROM patients WHERE name = ?", (name,))
@@ -186,9 +185,7 @@ class DBManager:
 
     def add_edf_file(self, patient_id: int, file_hash: str, start_date: float,
                      eeg_ch: int, rate: float, montage: str = "", notes: str = "") -> int:
-        """
-        Add a new EDF file to the database.
-        """
+        """Add a new EDF file to the database."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT edf_id FROM edf_files WHERE file_hash = ?", (file_hash,))
         result = cursor.fetchone()
@@ -205,9 +202,7 @@ class DBManager:
     def add_segment(self, patient_id: int, edf_id: int, seg_fpath: str,
                     start_time: float, end_time: float, l_marker: str,
                     r_marker: str, notes: str = "") -> int:
-        """
-        Add a new segment to the database.
-        """
+        """Add a new segment to the database."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT seg_id FROM segments WHERE seg_fpath = ?", (seg_fpath,))
         result = cursor.fetchone()
@@ -222,9 +217,7 @@ class DBManager:
         return cursor.lastrowid
 
     def add_diagnosis(self, patient_id: int, ds_code: str, ds_descript: str, note: str = ""):
-        """
-        Add a diagnosis for a patient.
-        """
+        """Add a diagnosis for a patient."""
         cursor = self.conn.cursor()
         cursor.execute(
             "INSERT INTO diagnosis (patient_id, ds_code, ds_descript, note) VALUES (?, ?, ?, ?)",
@@ -273,9 +266,7 @@ class DBManager:
         return stats
 
     def fill_segments_from_dict(self, seg_dict: Dict, edf_file_path: str) -> Tuple[int, int]:
-        """
-        Fill database with segments from the segment dictionary.
-        """
+        """ Fill database with segments from the segment dictionary. """
         file_hash = self._calculate_file_hash(edf_file_path)
         if self.get_edf_file_by_hash(file_hash):
             raise ValueError("EDF file already exists in database")
@@ -356,6 +347,7 @@ class DBManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+
 # core/edf_processor.py
 import os
 import hashlib
@@ -395,8 +387,6 @@ class EDFProcessor:
             raw = read_raw_edf(file_path, preload=False)
             info = raw.info
             subject_info = info.get('subject_info', {})
-
-            # Basic metadata
             metadata = {
                 'file_name': os.path.basename(file_path),
                 'subject_info': subject_info,
@@ -405,8 +395,6 @@ class EDFProcessor:
                 'sfreq': info['sfreq'],
                 'meas_date': info.get('meas_date', None)
             }
-
-            # Additional details if requested
             if detailed:
                 metadata['events'] = find_events(raw) if 'stim' in info['ch_names'] else None
 
@@ -822,6 +810,7 @@ if __name__ == "__main__":
     processor = EDFProcessor(directory)
     processor.run()
 
+
 # core/edf_segmentor.py
 import mne
 from mne.viz import plot_montage
@@ -838,8 +827,9 @@ class EventProcessor:
     @staticmethod
     def _clean_event_name(name):
         """Cleans event name: removes brackets/parentheses, checks excluded names, translates to English."""
+        global excluded_names
         cleaned_name = re.sub(r'\[.*?\]|\(.*?\)', '', name).strip()
-        excluded_names = ["stimFlash", "Артефакт", "Начало печати", "Окончание печати"]
+        excluded_names = ["stimFlash", "Артефакт", "Начало печати", "Окончание печати", "Эпилептиформная активность", '''Комплекс "острая волна - медленная волна"''']
         if cleaned_name in excluded_names or name in excluded_names:
             return None
         if not cleaned_name:
@@ -856,7 +846,8 @@ class EventProcessor:
             "Остановка стимуляции": "StimOff",
             "Гипервентиляция": "Hypervent",
             "После гипервентиляции": "PostHypervent",
-            "Разрыв записи": "Gap"
+            "Разрыв записи": "Gap",
+            "Бодрствование": "Awake"
         }
         for ru_name, en_name in translations.items():
             if ru_name in cleaned_name:
@@ -970,7 +961,7 @@ class EDFSegmentor:
             time_seconds = time_index / self.raw.info['sfreq']
             table_data.append([f"{time_seconds:.2f}", event_id_value, evt_name])
         headers = ["Time (sec)", "Event ID", "Description"]
-        excluded_events_note = " (excluding stimFlash, Артефакт, Начало печати, Окончание печати)"
+        excluded_events_note = excluded_names
         return f"\nNumber of events: {len(self.events)}\nEvent List{excluded_events_note}:\n{tabulate(table_data, headers, tablefmt=settings.TABLE_FORMAT)}\n"
 
     def process(self):
@@ -1139,6 +1130,7 @@ class EDFVisualizer:
             print(f"Сохранено: {save_path}")
 
 
+
 # core/montage_manager.py
 import mne
 import numpy as np
@@ -1187,6 +1179,7 @@ class MontageManager:
         return mne.channels.DigMontage(dig=dig_pts, ch_names=ch_n)
 
 
+
 # edf_app.py
 import tkinter.font as tkfont
 import csv
@@ -1204,6 +1197,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 class EDFApp:
     def __init__(self, root):
+        super().__init__()
         self.root = root
         self.root.title("EDF File Manager")
         self.root.geometry("1700x700")
@@ -1246,7 +1240,7 @@ class EDFApp:
             ("Check", self.check_corrupted, "Check for corrupted files"),
             ("Dupes", self.find_duplicates, "Find and delete duplicates"),
             ("Similar", self.find_similar_time, "Find files with similar times"),
-            ("Stats", self.generate_stats, "Generate statistics"),
+            ("EDF Stats", self.generate_stats, "Generate statistics"),
             ("Patients", self.generate_patient_table, "Create patient table"),
             ("Random", self.randomize_filenames, "Randomize filenames"),
             ("Anonym", self.remove_patient_info, "Remove patient info"),
@@ -1279,7 +1273,7 @@ class EDFApp:
         db_buttons = [
             ("Create", self.create_database, "Create new database"),
             ("Fill", self.fill_segments, "Fill with segments"),
-            ("Stats", self.show_db_stats, "Show statistics"),
+            ("DB Stats", self.show_db_stats, "Show statistics"),
             ("Edit", self.edit_database, "View/edit tables"),
         ]
         for idx, (text, command, tooltip) in enumerate(db_buttons):
@@ -1298,6 +1292,83 @@ class EDFApp:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
+
+        self.btn_batch_process = tk.Button(
+            self.button_frame,
+            text="All split & Fill",
+            command=self.batch_process_edf_files,
+            state=tk.DISABLED
+        )
+        self.btn_batch_process.grid(row=1, column=6, padx=2, pady=5, sticky="ew")
+        self._create_tooltip(self.btn_batch_process, "Process all EDF files in folder and save segments to DB")
+
+    def batch_process_edf_files(self):
+        """Обработать все EDF файлы в папке и сохранить сегменты в базу данных"""
+        if not self.directory:
+            messagebox.showwarning("Ошибка", "Сначала выберите рабочую папку")
+            return
+
+        if not hasattr(self, 'db_manager') or not self.db_manager:
+            messagebox.showwarning("Ошибка", "Сначала создайте базу данных")
+            return
+
+        # Получаем список всех EDF файлов в папке
+        edf_files = [f for f in os.listdir(self.directory) if f.lower().endswith('.edf')]
+        if not edf_files:
+            messagebox.showinfo("Информация", "В выбранной папке нет EDF файлов")
+            return
+
+        self.text_output.delete(1.0, tk.END)
+        self.text_output.insert(tk.END, f"Начинаем пакетную обработку {len(edf_files)} файлов...\n")
+
+        total_segments = 0
+        processed_files = 0
+
+        for edf_file in edf_files:
+            try:
+                file_path = os.path.join(self.directory, edf_file)
+                self.text_output.insert(tk.END, f"\nОбработка файла: {edf_file}\n")
+                self.text_output.update_idletasks()
+
+                # Создаем сегментатор и загружаем файл
+                segmentor = EDFSegmentor(self.text_output)
+                segmentor.load_metadata(file_path)
+                segmentor.process()
+
+                # Добавляем сегменты в базу данных
+                if segmentor.seg_dict:
+                    try:
+                        patient_id, edf_id = self.db_manager.fill_segments_from_dict(
+                            segmentor.seg_dict,
+                            file_path
+                        )
+                        segments_added = len(segmentor.seg_dict)
+                        total_segments += segments_added
+                        self.text_output.insert(
+                            tk.END,
+                            f"Добавлено {segments_added} сегментов в БД (Patient ID: {patient_id}, EDF ID: {edf_id})\n"
+                        )
+                        processed_files += 1
+                    except ValueError as e:
+                        self.text_output.insert(tk.END, f"Ошибка добавления в БД: {str(e)}\n")
+                else:
+                    self.text_output.insert(tk.END, "Файл не содержит сегментов для добавления\n")
+
+            except Exception as e:
+                self.text_output.insert(tk.END, f"Ошибка обработки файла {edf_file}: {str(e)}\n")
+                logging.error(f"Error processing {edf_file}: {e}")
+                continue
+
+        # Показываем итоговую статистику
+        self.text_output.insert(
+            tk.END,
+            f"\nПакетная обработка завершена!\n"
+            f"Обработано файлов: {processed_files}/{len(edf_files)}\n"
+            f"Всего добавлено сегментов: {total_segments}\n"
+        )
+
+        # Обновляем статус базы данных
+        self._update_db_status()
 
     def _display_table(self, parent, table_name):
         """Отобразить содержимое таблицы с возможностью сортировки и контекстного меню."""
@@ -1550,32 +1621,21 @@ class EDFApp:
         """Create tab with SQL query editor"""
         sql_frame = ttk.Frame(notebook)
         notebook.add(sql_frame, text="SQL Query")
-
-        # SQL input area
         tk.Label(sql_frame, text="SQL Query:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
-
         self.sql_input = scrolledtext.ScrolledText(sql_frame, wrap=tk.WORD, height=8)
         self.sql_input.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # Button frame
         btn_frame = ttk.Frame(sql_frame)
         btn_frame.pack(fill=tk.X, padx=5, pady=5)
-
         ttk.Button(btn_frame, text="Execute", command=self._execute_sql).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="Clear", command=self._clear_sql).pack(side=tk.LEFT)
         ttk.Button(btn_frame, text="Save Query", command=self._save_query).pack(side=tk.RIGHT)
         ttk.Button(btn_frame, text="Load Query", command=self._load_query).pack(side=tk.RIGHT)
-
-        # Results area
         tk.Label(sql_frame, text="Results:", font=('Arial', 10, 'bold')).pack(anchor=tk.W)
-
         self.sql_results = ttk.Treeview(sql_frame)
         self.sql_results.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
         scroll_y = ttk.Scrollbar(sql_frame, orient="vertical", command=self.sql_results.yview)
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.sql_results.configure(yscrollcommand=scroll_y.set)
-
         scroll_x = ttk.Scrollbar(sql_frame, orient="horizontal", command=self.sql_results.xview)
         scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         self.sql_results.configure(xscrollcommand=scroll_x.set)
@@ -1600,6 +1660,8 @@ class EDFApp:
             self.text_output.insert(tk.END, f"База данных создана в:\n{db_path}\n")
             self._enable_db_buttons()
             self._update_db_status()
+            if not any(f.lower().endswith('.edf') for f in os.listdir(self.directory)):
+                messagebox.showwarning("Предупреждение", "В выбранной папке нет EDF файлов")
 
         except Exception as e:
             error_msg = f"Error creating database: {str(e)}"
@@ -1771,6 +1833,7 @@ class EDFApp:
                 if isinstance(btn, tk.Button) and btn["text"] != "Open":
                     btn.config(state=tk.NORMAL)
             self._try_autoload_db()
+            self.btn_batch_process.config(state=tk.NORMAL)
 
     def load_edf_file(self):
         """Load an EDF file for segmentation."""
