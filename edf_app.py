@@ -91,8 +91,8 @@ class EDFApp:
         db_buttons = [
             ("Create", self.create_database, "Create new database"),
             ("Fill", self.fill_segments, "Fill with segments"),
-            ("DB Stats", self.show_db_stats, "Show statistics"),
-            ("Edit", self.edit_database, "View/edit tables"),
+            ("DB Stats", self.show_db_stats, "Show DB statistics"),
+            ("Editor", self.edit_database, "View/edit tables"),
         ]
         for idx, (text, command, tooltip) in enumerate(db_buttons):
             btn = tk.Button(self.button_frame, text=text, width=8, command=command,
