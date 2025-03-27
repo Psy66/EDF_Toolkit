@@ -116,10 +116,10 @@ This application is intended for educational and research purposes only. Use it 
 
 ### Database management
 - **Create DB**: Creates a new SQLite database in the `DB` folder and automatically generates the table structure (patients, edf_files, segments, diagnosis). Automatically connects if the DB already exists.
-- ***Fill***: Adds current segments to the database. Automatically links segments to files and patients. Saves: paths to segment files, start/end timestamps, event markers.
-- ***DB Stats***: Shows a summary of the database.
-- ***Editor***: Visual interface for viewing tables.
-- ***All Split & Fill***: Segments all EDF files in the folder and fills the DB.
+- **Fill**: Adds current segments to the database. Automatically links segments to files and patients. Saves: paths to segment files, start/end timestamps, event markers.
+- **DB Stats**: Shows a summary of the database.
+- **Editor**: Visual interface for viewing tables.
+- **All Split & Fill**: Segments all EDF files in the folder and fills the DB.
 ---
 
 ## 🖥️ Interface
