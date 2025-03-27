@@ -44,12 +44,13 @@ class Segment:
 class Diagnosis:
     patient_id: int
     ds_code: str
-    ds_descript: str
-    note: str = ""
+    clinical_data: str
+    notes: str = ""
 
 class DBManager:
+    """Database manager for storing and retrieving data."""
     def __init__(self, directory: str = ""):
-        """Инициализация менеджера БД с хранением всех файлов в подпапке DB."""
+        """Initialize the database manager."""
         self.directory = os.path.join(directory, "DB") if directory else "DB"
         os.makedirs(self.directory, exist_ok=True)  # Создаем папку если не существует
         self.db_path = os.path.join(self.directory, "eeg_database.db")
@@ -72,6 +73,7 @@ class DBManager:
         """Create database tables if they don't exist."""
         cursor = self.conn.cursor()
 
+        # Patients table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS patients (
             patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,23 +130,23 @@ class DBManager:
         self.conn.commit()
 
     def get_last_record(self, table_name: str):
-        """Получить последнюю запись из указанной таблицы."""
+        """Get the last record from a table."""
         cursor = self.conn.cursor()
         cursor.execute(f"SELECT * FROM {table_name} ORDER BY ROWID DESC LIMIT 1")
         return cursor.fetchone()
 
     def database_size(self) -> int:
-        """Получить размер базы данных в байтах."""
+        """Get the size of the database in bytes."""
         return os.path.getsize(self.db_path)
 
     def get_table_data(self, table_name: str) -> List[Tuple]:
-        """Получить все данные из указанной таблицы."""
+        """Get all data from a table."""
         cursor = self.conn.cursor()
         cursor.execute(f"SELECT * FROM {table_name}")
         return cursor.fetchall()
 
     def get_table_columns(self, table_name: str) -> List[str]:
-        """Получить названия колонок таблицы."""
+        """Get column names from a table."""
         cursor = self.conn.cursor()
         cursor.execute(f"PRAGMA table_info({table_name})")
         return [column[1] for column in cursor.fetchall()]
@@ -155,7 +157,6 @@ class DBManager:
 
     def add_patient(self, name: str, sex: str, age: int, note: str = "") -> int:
         """Add a new patient to the database or return existing patient_id if patient already exists."""
-        # Check if patient already exists
         cursor = self.conn.cursor()
         cursor.execute("SELECT patient_id FROM patients WHERE name = ?", (name,))
         result = cursor.fetchone()
@@ -316,6 +317,119 @@ class DBManager:
                 r_marker=seg_data['next_event']
             )
         return patient_id, edf_id
+
+    def get_avg_segment_duration(self):
+        """Get average duration of all segments in seconds"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT AVG(duration) FROM segments")
+        return cursor.fetchone()[0] or 0
+
+    def get_gender_distribution(self):
+        """Get gender distribution statistics"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT gender, COUNT(*) FROM patients GROUP BY gender")
+        return dict(cursor.fetchall())
+
+    def get_age_statistics(self):
+        """Get age statistics (avg, min, max)"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT AVG(age), MIN(age), MAX(age) FROM patients")
+        avg, min_age, max_age = cursor.fetchone()
+        return {
+            'avg': avg or 0,
+            'min': min_age or 0,
+            'max': max_age or 0
+        }
+
+    def get_segment_duration_stats(self):
+        """Get segment duration statistics (avg, min, max) by calculating duration as end_time - start_time"""
+        cursor = self.conn.cursor()
+        try:
+            # Проверяем наличие необходимых столбцов
+            cursor.execute("PRAGMA table_info(segments)")
+            columns = [info[1] for info in cursor.fetchall()]
+
+            if 'start_time' in columns and 'end_time' in columns:
+                # Вычисляем статистику по продолжительности сегментов
+                cursor.execute("""
+                    SELECT 
+                        AVG(end_time - start_time) as avg_duration,
+                        MIN(end_time - start_time) as min_duration, 
+                        MAX(end_time - start_time) as max_duration
+                    FROM segments
+                    WHERE end_time > start_time  -- Исключаем некорректные записи
+                """)
+                result = cursor.fetchone()
+
+                if result and result[0] is not None:
+                    return {
+                        'avg': result[0],
+                        'min': result[1],
+                        'max': result[2]
+                    }
+                else:
+                    logging.warning("No valid segment duration data found")
+            else:
+                logging.warning("Required columns (start_time, end_time) not found in segments table")
+
+        except Exception as e:
+            logging.error(f"Error calculating segment duration stats: {str(e)}")
+
+        return None
+
+    def get_gender_distribution(self):
+        """Get gender distribution statistics"""
+        cursor = self.conn.cursor()
+        try:
+            # Проверяем структуру таблицы patients
+            cursor.execute("PRAGMA table_info(patients)")
+            columns = [info[1] for info in cursor.fetchall()]
+
+            # Определяем имя столбца с полом
+            gender_column = None
+            for col in columns:
+                if col.lower() in ['gender', 'sex']:
+                    gender_column = col
+                    break
+
+            if not gender_column:
+                return None
+
+            cursor.execute(f"SELECT {gender_column}, COUNT(*) FROM patients GROUP BY {gender_column}")
+            return dict(cursor.fetchall())
+        except Exception as e:
+            print(f"Error getting gender distribution: {e}")
+        return None
+
+    def get_age_statistics(self):
+        """Get age statistics (avg, min, max)"""
+        cursor = self.conn.cursor()
+        try:
+            # Проверяем структуру таблицы patients
+            cursor.execute("PRAGMA table_info(patients)")
+            columns = [info[1] for info in cursor.fetchall()]
+
+            # Определяем имя столбца с возрастом
+            age_column = None
+            for col in columns:
+                if col.lower() in ['age', 'patient_age']:
+                    age_column = col
+                    break
+
+            if not age_column:
+                return None
+
+            cursor.execute(f"SELECT AVG({age_column}), MIN({age_column}), MAX({age_column}) FROM patients")
+            result = cursor.fetchone()
+            if result and result[0] is not None:
+                return {
+                    'avg': result[0],
+                    'min': result[1],
+                    'max': result[2]
+                }
+        except Exception as e:
+            print(f"Error getting age stats: {e}")
+        return None
 
     @staticmethod
     def _calculate_file_hash(file_path: str, algorithm: str = "sha256") -> str:

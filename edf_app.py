@@ -4,6 +4,7 @@ import csv
 import os
 import tkinter as tk
 import logging
+import time
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from config.settings import settings
 from core.edf_processor import EDFProcessor
@@ -45,7 +46,6 @@ class EDFApp:
 
     def _setup_ui(self):
         """Initialize the user interface with all buttons in one frame."""
-        # Main button frame
         self.button_frame = tk.Frame(self.root)
         self.button_frame.pack(pady=10)
         for i in range(12):
@@ -110,7 +110,6 @@ class EDFApp:
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
-
         self.btn_batch_process = tk.Button(
             self.button_frame,
             text="All split & Fill",
@@ -121,39 +120,29 @@ class EDFApp:
         self._create_tooltip(self.btn_batch_process, "Process all EDF files in folder and save segments to DB")
 
     def batch_process_edf_files(self):
-        """Обработать все EDF файлы в папке и сохранить сегменты в базу данных"""
+        """Process all EDF files in the directory and save segments to the database"""
         if not self.directory:
-            messagebox.showwarning("Ошибка", "Сначала выберите рабочую папку")
+            messagebox.showwarning("Error", "Please select a working directory first")
             return
-
         if not hasattr(self, 'db_manager') or not self.db_manager:
-            messagebox.showwarning("Ошибка", "Сначала создайте базу данных")
+            messagebox.showwarning("Error", "Please create a database first")
             return
-
-        # Получаем список всех EDF файлов в папке
         edf_files = [f for f in os.listdir(self.directory) if f.lower().endswith('.edf')]
         if not edf_files:
-            messagebox.showinfo("Информация", "В выбранной папке нет EDF файлов")
+            messagebox.showinfo("Information", "No EDF files found in the selected directory")
             return
-
         self.text_output.delete(1.0, tk.END)
-        self.text_output.insert(tk.END, f"Начинаем пакетную обработку {len(edf_files)} файлов...\n")
-
+        self.text_output.insert(tk.END, f"Starting batch processing of {len(edf_files)} files...\n")
         total_segments = 0
         processed_files = 0
-
         for edf_file in edf_files:
             try:
                 file_path = os.path.join(self.directory, edf_file)
-                self.text_output.insert(tk.END, f"\nОбработка файла: {edf_file}\n")
+                self.text_output.insert(tk.END, f"\nProcessing file: {edf_file}\n")
                 self.text_output.update_idletasks()
-
-                # Создаем сегментатор и загружаем файл
                 segmentor = EDFSegmentor(self.text_output)
                 segmentor.load_metadata(file_path)
                 segmentor.process()
-
-                # Добавляем сегменты в базу данных
                 if segmentor.seg_dict:
                     try:
                         patient_id, edf_id = self.db_manager.fill_segments_from_dict(
@@ -164,99 +153,127 @@ class EDFApp:
                         total_segments += segments_added
                         self.text_output.insert(
                             tk.END,
-                            f"Добавлено {segments_added} сегментов в БД (Patient ID: {patient_id}, EDF ID: {edf_id})\n"
+                            f"Added {segments_added} segments to DB (Patient ID: {patient_id}, EDF ID: {edf_id})\n"
                         )
                         processed_files += 1
                     except ValueError as e:
-                        self.text_output.insert(tk.END, f"Ошибка добавления в БД: {str(e)}\n")
+                        self.text_output.insert(tk.END, f"Database insertion error: {str(e)}\n")
                 else:
-                    self.text_output.insert(tk.END, "Файл не содержит сегментов для добавления\n")
-
+                    self.text_output.insert(tk.END, "File contains no segments to add\n")
             except Exception as e:
-                self.text_output.insert(tk.END, f"Ошибка обработки файла {edf_file}: {str(e)}\n")
+                self.text_output.insert(tk.END, f"Error processing file {edf_file}: {str(e)}\n")
                 logging.error(f"Error processing {edf_file}: {e}")
                 continue
-
-        # Показываем итоговую статистику
         self.text_output.insert(
             tk.END,
-            f"\nПакетная обработка завершена!\n"
-            f"Обработано файлов: {processed_files}/{len(edf_files)}\n"
-            f"Всего добавлено сегментов: {total_segments}\n"
+            f"\nBatch processing completed!\n"
+            f"Files processed: {processed_files}/{len(edf_files)}\n"
+            f"Total segments added: {total_segments}\n"
         )
-
-        # Обновляем статус базы данных
         self._update_db_status()
 
-    def _display_table(self, parent, table_name):
-        """Отобразить содержимое таблицы с возможностью сортировки и контекстного меню."""
-        for widget in parent.winfo_children():
-            if isinstance(widget, tk.Frame) and widget != parent.winfo_children()[0]:
-                widget.destroy()
+    def _copy_table_data(self, tree):
+        """Copy selected table data to clipboard"""
         try:
-            table_container = tk.Frame(parent)
-            table_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            toolbar = tk.Frame(table_container)
+            selected_items = tree.selection()
+            if not selected_items:
+                return
+
+            data = []
+            for item in selected_items:
+                values = tree.item(item, 'values')
+                data.append('\t'.join(str(v) for v in values))
+
+            self.root.clipboard_clear()
+            self.root.clipboard_append('\n'.join(data))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to copy data: {str(e)}")
+
+    def _display_table(self, parent, table_name):
+        """Show table content with sorting and context menu options"""
+        # Очищаем предыдущие виджеты
+        for widget in parent.winfo_children():
+            widget.destroy()
+
+        try:
+            # Создаем основной контейнер
+            container = tk.Frame(parent)
+            container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # Создаем панель инструментов
+            toolbar = tk.Frame(container)
             toolbar.pack(fill=tk.X, pady=(0, 5))
-            refresh_btn = tk.Button(toolbar, text="🔄 Обновить",
-                                    command=lambda: self._refresh_table(table_container, table_name),
-                                    bd=1, relief=tk.RAISED)
-            refresh_btn.pack(side=tk.LEFT, padx=2)
-            export_btn = tk.Button(toolbar, text="💾 Экспорт в CSV",
-                                   command=lambda: self._export_table(table_name),
-                                   bd=1, relief=tk.RAISED)
-            export_btn.pack(side=tk.LEFT, padx=2)
+
+            # Кнопки на панели инструментов
+            tk.Button(toolbar, text="🔄 Update",
+                      command=lambda: self._refresh_table(parent, table_name),
+                      bd=1, relief=tk.RAISED).pack(side=tk.LEFT, padx=2)
+
+            tk.Button(toolbar, text="💾 Export to CSV",
+                      command=lambda: self._export_table(table_name),
+                      bd=1, relief=tk.RAISED).pack(side=tk.LEFT, padx=2)
+
+            # Получаем данные из базы данных
             columns = self.db_manager.get_table_columns(table_name)
             data = self.db_manager.get_table_data(table_name)
-            table_frame = tk.Frame(table_container)
+
+            # Создаем фрейм для таблицы с прокруткой
+            table_frame = tk.Frame(container)
             table_frame.pack(fill=tk.BOTH, expand=True)
+
+            # Настройка прокрутки
             scroll_y = tk.Scrollbar(table_frame)
             scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+
             scroll_x = tk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
             scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
-            self.tree = ttk.Treeview(table_frame, columns=columns, show="headings",
-                                     yscrollcommand=scroll_y.set,
-                                     xscrollcommand=scroll_x.set,
-                                     selectmode='extended')
-            self.tree.pack(fill=tk.BOTH, expand=True)
-            scroll_y.config(command=self.tree.yview)
-            scroll_x.config(command=self.tree.xview)
+
+            # Создаем Treeview
+            tree = ttk.Treeview(
+                table_frame,
+                columns=columns,
+                show="headings",
+                yscrollcommand=scroll_y.set,
+                xscrollcommand=scroll_x.set,
+                selectmode='extended'
+            )
+            tree.pack(fill=tk.BOTH, expand=True)
+
+            # Настраиваем прокрутку
+            scroll_y.config(command=tree.yview)
+            scroll_x.config(command=tree.xview)
+
+            # Настраиваем заголовки столбцов
             for col in columns:
-                self.tree.heading(col, text=col,
-                                  command=lambda c=col: self._sort_treeview(self.tree, c, False))
-                self.tree.column(col, width=tkfont.Font().measure(col) + 20,
-                                 stretch=tk.YES, anchor=tk.W)
-            if len(data) > 1000:
-                progress = ttk.Progressbar(table_container, orient=tk.HORIZONTAL,
-                                           length=200, mode='determinate')
-                progress.pack(pady=5)
-                progress["maximum"] = len(data)
-                batch_size = 100
-                for i in range(0, len(data), batch_size):
-                    batch = data[i:i + batch_size]
-                    for row in batch:
-                        self.tree.insert("", tk.END, values=row)
-                    progress["value"] = i + len(batch)
-                    table_container.update()
-                progress.destroy()
-            else:
-                for row in data:
-                    self.tree.insert("", tk.END, values=row)
-            self._auto_resize_columns(self.tree, columns)
-            self._setup_table_context_menu(table_name)
+                tree.heading(col, text=col,
+                             command=lambda c=col: self._sort_treeview(tree, c, False))
+                tree.column(col, width=tkfont.Font().measure(col) + 20,
+                            stretch=tk.YES, anchor=tk.W)
+
+            # Заполняем таблицу данными
+            for row in data:
+                tree.insert("", tk.END, values=row)
+
+            # Автоматически подгоняем ширину столбцов
+            self._auto_resize_columns(tree, columns)
+
+            # Настраиваем контекстное меню
+            self._setup_table_context_menu(tree, table_name)
+
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось отобразить таблицу {table_name}:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to display table {table_name}:\n{str(e)}")
 
     def _sort_treeview(self, tree, col, reverse):
-        """Сортировка Treeview по колонке."""
+        """Table sorting."""
         data = [(tree.set(child, col), child) for child in tree.get_children('')]
         data.sort(reverse=reverse)
         for index, (val, child) in enumerate(data):
             tree.move(child, '', index)
         tree.heading(col, command=lambda: self._sort_treeview(tree, col, not reverse))
 
-    def _auto_resize_columns(self, tree, columns):
-        """Автоматическая подстройка ширины колонок."""
+    @staticmethod
+    def _auto_resize_columns(tree, columns):
+        """Automatically adjust column widths."""
         for col in columns:
             max_width = tkfont.Font().measure(col)
             for row in tree.get_children():
@@ -264,22 +281,29 @@ class EDFApp:
                 max_width = max(max_width, tkfont.Font().measure(str(cell_value)))
             tree.column(col, width=max_width + 20)
 
-    def _setup_table_context_menu(self, table_name):
-        """Настройка контекстного меню для таблицы."""
-        menu = tk.Menu(self.tree, tearoff=0)
-        menu.add_command(label="Копировать", command=self._copy_table_data)
-        menu.add_command(label="Редактировать",
-                         command=lambda: self._edit_record(table_name))
-        menu.add_command(label="Удалить",
-                         command=lambda: self._delete_record(table_name))
-        self.tree.bind("<Button-3>", lambda event: menu.post(event.x_root, event.y_root))
+    def _setup_table_context_menu(self, tree, table_name):
+        """Add context menu to table."""
+        menu = tk.Menu(tree, tearoff=0)
+        menu.add_command(label="Copy", command=lambda: self._copy_table_data(tree))
+        menu.add_command(label="Update",
+                         command=lambda: self._refresh_table(tree.master.master, table_name))
+        menu.add_command(label="Export to CSV",
+                         command=lambda: self._export_table(table_name))
+
+        def show_menu(event):
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+
+        tree.bind("<Button-3>", show_menu)
 
     def _refresh_table(self, container, table_name):
-        """Обновить содержимое таблицы."""
+        """Update table data."""
         self._display_table(container, table_name)
 
     def _export_table(self, table_name):
-        """Экспорт таблицы в CSV файл."""
+        """Export table data to CSV file."""
         try:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
@@ -293,9 +317,9 @@ class EDFApp:
                     writer = csv.writer(f)
                     writer.writerow(columns)
                     writer.writerows(data)
-                messagebox.showinfo("Успех", f"Данные экспортированы в:\n{file_path}")
+                messagebox.showinfo("Success", f"Data exported to:\n{file_path}")
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось экспортировать данные:\n{str(e)}")
+            messagebox.showerror("Error", f"Failed to export data:\n{str(e)}")
 
     def edit_database(self):
         """Open database editor window."""
@@ -353,7 +377,6 @@ class EDFApp:
                 self.sql_results.delete(row)
             self.sql_results["columns"] = []
             if query.lower().strip().startswith(("select", "pragma", "explain")):
-                # For SELECT queries - show results in table
                 columns = [desc[0] for desc in cursor.description]
                 self.sql_results["columns"] = columns
                 for col in columns:
@@ -380,7 +403,7 @@ class EDFApp:
         self.sql_input.delete("1.0", tk.END)
         self.sql_input.insert("1.0", query)
         if hasattr(self, 'notebook'):
-            self.notebook.select(1)  # Switch to SQL tab
+            self.notebook.select(1)
 
     def _clear_sql(self):
         """Clear SQL query editor"""
@@ -424,16 +447,30 @@ class EDFApp:
         """Create tab with table selection and viewing"""
         table_frame = ttk.Frame(notebook)
         notebook.add(table_frame, text="Tables")
+
+        # Создаем контейнер для списка таблиц
         list_frame = ttk.Frame(table_frame, width=200)
         list_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+
         tk.Label(list_frame, text="Database Tables", font=('Arial', 10, 'bold')).pack()
+
+        # Создаем список таблиц
         self.table_listbox = tk.Listbox(list_frame)
         self.table_listbox.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Заполняем список таблиц
         for table in ["patients", "edf_files", "segments", "diagnosis"]:
             self.table_listbox.insert(tk.END, table)
-        self.table_listbox.bind('<<ListboxSelect>>', self._load_table_data)
+
+        # Создаем контейнер для данных таблицы
         self.table_data_frame = ttk.Frame(table_frame)
         self.table_data_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Привязываем событие выбора таблицы к методу _display_table
+        self.table_listbox.bind('<<ListboxSelect>>',
+                                lambda e: self._display_table(self.table_data_frame,
+                                                              self.table_listbox.get(
+                                                                  self.table_listbox.curselection())))
 
     def _create_sql_editor_tab(self, notebook):
         """Create tab with SQL query editor"""
@@ -459,27 +496,27 @@ class EDFApp:
         self.sql_results.configure(xscrollcommand=scroll_x.set)
 
     def create_database(self):
-        """Создать новую базу данных в папке DB."""
+        """Create database"""
         try:
             if not self.directory:
-                messagebox.showwarning("Ошибка", "Сначала выберите рабочую папку")
+                messagebox.showwarning("Error", "Please select a directory.")
                 return
             db_folder = os.path.join(self.directory, "DB")
             db_path = os.path.join(db_folder, "eeg_database.db")
             os.makedirs(db_folder, exist_ok=True)
             if os.path.exists(db_path):
-                if not messagebox.askyesno("Подтверждение",
-                                           "База данных уже существует. Пересоздать?"):
-                    self.text_output.insert(tk.END, "Используется существующая БД\n")
+                if not messagebox.askyesno("Confirmation",
+                                           "Database already exists. Recreate?"):
+                    self.text_output.insert(tk.END, "Database already exists.\n")
                     return
             self.db_manager = DBManager(self.directory)
             if not self.db_manager.database_exists():
-                raise RuntimeError("Не удалось создать файл БД")
-            self.text_output.insert(tk.END, f"База данных создана в:\n{db_path}\n")
+                raise RuntimeError("Failed to create database file")
+            self.text_output.insert(tk.END, f"Database created at:\n{db_path}\n")
             self._enable_db_buttons()
             self._update_db_status()
             if not any(f.lower().endswith('.edf') for f in os.listdir(self.directory)):
-                messagebox.showwarning("Предупреждение", "В выбранной папке нет EDF файлов")
+                messagebox.showwarning("Warning", "No EDF files found in the directory.")
 
         except Exception as e:
             error_msg = f"Error creating database: {str(e)}"
@@ -489,8 +526,8 @@ class EDFApp:
                 del self.db_manager
 
     def _enable_db_buttons(self):
-        """Активировать кнопки работы с базой данных."""
-        db_buttons = ["Fill", "Stats", "Edit"]  # Сокращенные названия кнопок из _setup_ui
+        """Enable database buttons."""
+        db_buttons = ["Fill", "Stats", "Edit"]
         for btn in self.button_frame.winfo_children():
             if isinstance(btn, tk.Button) and btn["text"] in db_buttons:
                 btn.config(state=tk.NORMAL)
@@ -507,35 +544,75 @@ class EDFApp:
             )
 
     def show_db_stats(self):
-        """Показать статистику базы данных с очисткой экрана."""
-        self.text_output.delete(1.0, tk.END)  # Очищаем экран
+        """Show detailed database statistics."""
+        self.text_output.delete(1.0, tk.END)
+
         if not hasattr(self, 'db_manager') or not self.db_manager:
             self.text_output.insert(tk.END, "Database not initialized. Please create database first.\n")
             return
+
         try:
+            # Основная информация о базе данных
+            self.text_output.insert(tk.END, "=== DATABASE STATISTICS ===\n\n")
+            db_size = os.path.getsize(self.db_manager.db_path) / (1024 * 1024)  # Размер в MB
+            self.text_output.insert(tk.END, f"Database file: {self.db_manager.db_path}\n")
+            self.text_output.insert(tk.END, f"Size: {db_size:.2f} MB\n\n")
+
+            # Статистика по количеству записей
             stats = self.db_manager.get_database_stats()
-            self.text_output.insert(tk.END, "=== DATABASE STATISTICS ===\n")
-            self.text_output.insert(tk.END, f"Location: {self.db_manager.db_path}\n\n")
-            self.text_output.insert(tk.END, "Records Count:\n")
-            self.text_output.insert(tk.END, f"- Patients: {stats['patients']}\n")
-            self.text_output.insert(tk.END, f"- EDF Files: {stats['edf_files']}\n")
-            self.text_output.insert(tk.END, f"- Segments: {stats['segments']}\n")
-            self.text_output.insert(tk.END, f"- Diagnoses: {stats['diagnoses']}\n\n")
-            self.text_output.insert(tk.END, "Last Added:\n")
-            try:
-                last_patient = self.db_manager.get_last_record("patients")
-                last_edf = self.db_manager.get_last_record("edf_files")
-                self.text_output.insert(tk.END, f"- Last Patient: {last_patient[1]} (ID: {last_patient[0]})\n")
-                self.text_output.insert(tk.END, f"- Last EDF File: {last_edf[0]} (Channels: {last_edf[4]})\n")
-            except Exception as e:
-                self.text_output.insert(tk.END, f"- Additional info unavailable: {str(e)}\n")
+            self.text_output.insert(tk.END, "=== RECORD COUNTS ===\n")
+            self.text_output.insert(tk.END, tabulate([
+                ["Patients", stats['patients']],
+                ["EDF Files", stats['edf_files']],
+                ["Segments", stats['segments']],
+                ["Diagnoses", stats['diagnoses']]
+            ], headers=["Table", "Records"], tablefmt="pretty") + "\n\n")
+
+            # Статистика по продолжительности сегментов
+            seg_stats = self.db_manager.get_segment_duration_stats()
+            if seg_stats:
+                self.text_output.insert(tk.END, "=== SEGMENT DURATION STATISTICS ===\n")
+                self.text_output.insert(tk.END, "Duration calculated as (end_time - start_time)\n")
+                self.text_output.insert(tk.END, tabulate([
+                    ["Average duration", f"{seg_stats['avg']:.2f} sec"],
+                    ["Shortest segment", f"{seg_stats['min']:.2f} sec"],
+                    ["Longest segment", f"{seg_stats['max']:.2f} sec"]
+                ], tablefmt="pretty") + "\n\n")
+            else:
+                self.text_output.insert(tk.END, "Segment duration statistics not available\n\n")
+
+            # Дополнительная статистика
+            self.text_output.insert(tk.END, "=== ADDITIONAL STATISTICS ===\n")
+
+            # Статистика по полу пациентов
+            gender_stats = self.db_manager.get_gender_distribution()
+            if gender_stats:
+                self.text_output.insert(tk.END, "\nGender Distribution:\n")
+                self.text_output.insert(tk.END, tabulate(
+                    gender_stats.items(),
+                    headers=["Gender", "Count"],
+                    tablefmt="pretty") + "\n")
+
+            # Статистика по возрасту пациентов
+            age_stats = self.db_manager.get_age_statistics()
+            if age_stats:
+                self.text_output.insert(tk.END, "\nPatient Age Statistics:\n")
+                self.text_output.insert(tk.END, tabulate([
+                    ["Average age", f"{age_stats['avg']:.1f} years"],
+                    ["Youngest patient", f"{age_stats['min']} years"],
+                    ["Oldest patient", f"{age_stats['max']} years"]
+                ], tablefmt="pretty") + "\n")
+
+            # Время генерации отчета
+            self.text_output.insert(tk.END, f"\nReport generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
         except Exception as e:
             error_msg = f"Error retrieving database stats: {str(e)}"
             self.text_output.insert(tk.END, error_msg + "\n")
             messagebox.showerror("Database Error", error_msg)
 
     def fill_segments(self):
-        """Заполнить базу данных сегментами из текущего словаря."""
+        """Fill the database with segments from the segmentor."""
         if not self.segmentor or not self.segmentor.seg_dict:
             messagebox.showwarning("Error", "No segments available to add to database.")
             return
@@ -563,7 +640,7 @@ class EDFApp:
             messagebox.showerror("Error", f"Failed to add segments: {e}")
 
     def _show_db_stats(self):
-        """Показать статистику базы данных."""
+        """Show database statistics."""
         if not self.db_manager:
             self.text_output.insert(tk.END, "Database not initialized.\n")
             return
