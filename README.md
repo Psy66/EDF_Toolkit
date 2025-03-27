@@ -28,6 +28,13 @@
 - ✂️ **Split EDF File**: Split the EDF file into segments based on events.
 - ⏲️ **Set Minimum Segment Duration**: Define the minimum duration for segments.
 
+### 🗃️ Database management
+- 🆕 **Create DB: Initialize SQLite DB with tables**
+- 📥 **Fill DB: Batch add segments**
+- 📊 **DB Stats: Report on the number of records**
+- ✏️ **Editor: Visual interface for viewing tables**
+- 🚀 **All Split & Fill: Batch segment all EDFs and fill DB**
+
 ---
 
 ## 🛠️ Installation
@@ -52,17 +59,10 @@ python edf_app.py
 
 1. Launch the application.
 2. Select a folder with EDF files using the **"Open Folder"** button.
-3. Use the corresponding buttons to perform the desired operations:
-   - 🖋️ **Rename EDF**: Renames files based on metadata.
-   - 🚫 **Remove Corrupted**: Deletes corrupted files.
-   - 🔍 **Remove Duplicates**: Deletes duplicate files.
-   - ⏱️ **Find Similar**: Finds files with similar recording start times.
-   - 📊 **Generate Statistics**: Generates statistics for the files.
-   - 📋 **Create Patient Table**: Creates a CSV table with patient names.
-   - 🎲 **Randomize Filenames**: Randomizes filenames.
-   - 👤 **Remove Patient Info**: Removes patient information from files.
-   - 📄 **Read EDF Info**: Displays information about the selected EDF file.
-   - ✂️ **Split EDF File**: Splits the loaded EDF file into segments.
+3. Use the corresponding buttons to perform the desired operations.
+4. Look at the ***"DB"*** and ***"Output"*** folders in the root of the working folder.
+5. For more details, see the Detailed Feature Descriptions section below.
+5. Click the ***"Exit"*** button to exit the application.
 
 ---
 
@@ -114,6 +114,12 @@ This application is intended for educational and research purposes only. Use it 
 - **Split EDF File**: Split the EDF file into segments based on events. The minimum segment duration can be configured.
 - **Set Minimum Segment Duration**: Define the minimum duration for segments (default is 5 seconds).
 
+### Database management
+- **Create DB**: Creates a new SQLite database in the `DB` folder and automatically generates the table structure (patients, edf_files, segments, diagnosis). Automatically connects if the DB already exists.
+- ***Fill***: Adds current segments to the database. Automatically links segments to files and patients. Saves: paths to segment files, start/end timestamps, event markers.
+- ***DB Stats***: Shows a summary of the database.
+- **Editor**: Visual interface for viewing tables.
+- ***All Split & Fill***: Segments all EDF files in the folder and fills the DB.
 ---
 
 ## 🖥️ Interface
@@ -128,19 +134,18 @@ At the bottom of the interface, there is an output field where the results of op
 
 ## 📂 Project Structure
 
-```
-EDF_Batch_Segment_Toolkit/
+EDF_Toolkit/
 ├── config/
 │   └── settings.py          # Application settings
 ├── core/
 │   ├── edf_processor.py     # Core logic for processing EDF files
 │   ├── edf_segmentor.py     # Logic for segmenting EDF files
+|   |── db_manager.py        # Database management
 │   ├── edf_visualizer.py    # Visualization of statistics
 │   └── montage_manager.py   # Montage creation for EEG channels
 ├── edf_app.py               # Main application module
 ├── README.md                # Project documentation
 └── requirements.txt         # Dependencies
-```
 
 ---
 
