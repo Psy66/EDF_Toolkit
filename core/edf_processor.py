@@ -37,8 +37,6 @@ class EDFProcessor:
             raw = read_raw_edf(file_path, preload=False)
             info = raw.info
             subject_info = info.get('subject_info', {})
-
-            # Basic metadata
             metadata = {
                 'file_name': os.path.basename(file_path),
                 'subject_info': subject_info,
@@ -47,8 +45,6 @@ class EDFProcessor:
                 'sfreq': info['sfreq'],
                 'meas_date': info.get('meas_date', None)
             }
-
-            # Additional details if requested
             if detailed:
                 metadata['events'] = find_events(raw) if 'stim' in info['ch_names'] else None
 

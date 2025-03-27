@@ -193,9 +193,7 @@ class DBManager:
     def add_segment(self, patient_id: int, edf_id: int, seg_fpath: str,
                     start_time: float, end_time: float, l_marker: str,
                     r_marker: str, notes: str = "") -> int:
-        """
-        Add a new segment to the database.
-        """
+        """Add a new segment to the database."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT seg_id FROM segments WHERE seg_fpath = ?", (seg_fpath,))
         result = cursor.fetchone()
@@ -210,9 +208,7 @@ class DBManager:
         return cursor.lastrowid
 
     def add_diagnosis(self, patient_id: int, ds_code: str, ds_descript: str, note: str = ""):
-        """
-        Add a diagnosis for a patient.
-        """
+        """Add a diagnosis for a patient."""
         cursor = self.conn.cursor()
         cursor.execute(
             "INSERT INTO diagnosis (patient_id, ds_code, ds_descript, note) VALUES (?, ?, ?, ?)",
@@ -261,9 +257,7 @@ class DBManager:
         return stats
 
     def fill_segments_from_dict(self, seg_dict: Dict, edf_file_path: str) -> Tuple[int, int]:
-        """
-        Fill database with segments from the segment dictionary.
-        """
+        """ Fill database with segments from the segment dictionary. """
         file_hash = self._calculate_file_hash(edf_file_path)
         if self.get_edf_file_by_hash(file_hash):
             raise ValueError("EDF file already exists in database")
