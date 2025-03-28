@@ -14,7 +14,7 @@ class Patient:
     patient_id: int
     name: str
     sex: str
-    age: int
+    birthday: str  # Формат 'ДД.ММ.ГГГГ'
     note: str = ""
 
 @dataclass
@@ -22,7 +22,7 @@ class EDFFile:
     edf_id: int
     patient_id: int
     file_hash: str
-    start_date: float
+    start_date: str  # Формат 'ДД.ММ.ГГГГ ЧЧ:ММ'
     eeg_ch: int
     rate: float
     montage: str = ""
@@ -79,7 +79,7 @@ class DBManager:
             patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             sex TEXT CHECK(sex IN ('M', 'F', 'N')) DEFAULT 'N',
-            age INTEGER,
+            birthday TEXT,
             note TEXT DEFAULT ''
         )
         """)
@@ -90,7 +90,7 @@ class DBManager:
             edf_id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id INTEGER NOT NULL,
             file_hash TEXT UNIQUE NOT NULL,
-            start_date REAL NOT NULL,
+            start_date TEXT NOT NULL,
             eeg_ch INTEGER NOT NULL,
             rate REAL NOT NULL,
             montage TEXT DEFAULT '',
@@ -155,16 +155,20 @@ class DBManager:
         """Check if database file exists."""
         return os.path.exists(self.db_path)
 
-    def add_patient(self, name: str, sex: str, age: int, note: str = "") -> int:
+    def add_patient(self, name: str, sex: str, birthday: str, note: str = "") -> int:
         """Add a new patient to the database or return existing patient_id if patient already exists."""
+        try:
+            datetime.strptime(birthday, '%d.%m.%Y')  # Изменили формат на точки
+        except ValueError:
+            raise ValueError("Invalid birthday format. Expected 'ДД.ММ.ГГГГ'")
         cursor = self.conn.cursor()
         cursor.execute("SELECT patient_id FROM patients WHERE name = ?", (name,))
         result = cursor.fetchone()
         if result:
             return result[0]
         cursor.execute(
-            "INSERT INTO patients (name, sex, age, note) VALUES (?, ?, ?, ?)",
-            (name, sex, age, note)
+            "INSERT INTO patients (name, sex, birthday, note) VALUES (?, ?, ?, ?)",
+            (name, sex, birthday, note)
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -175,7 +179,7 @@ class DBManager:
         cursor.execute(f"SELECT * FROM {table_name}")
         return cursor.fetchall()
 
-    def add_edf_file(self, patient_id: int, file_hash: str, start_date: float,
+    def add_edf_file(self, patient_id: int, file_hash: str, start_date: str,  # Изменяем тип на str
                      eeg_ch: int, rate: float, montage: str = "", notes: str = "") -> int:
         """Add a new EDF file to the database."""
         cursor = self.conn.cursor()
@@ -183,6 +187,12 @@ class DBManager:
         result = cursor.fetchone()
         if result:
             raise ValueError(f"EDF file with hash {file_hash} already exists in database (edf_id: {result[0]})")
+
+        try:
+            datetime.strptime(start_date, '%d.%m.%Y %H:%M')
+        except ValueError:
+            raise ValueError("Invalid date format. Expected 'ДД.ММ.ГГГГ ЧЧ:ММ'")
+
         cursor.execute(
             "INSERT INTO edf_files (patient_id, file_hash, start_date, eeg_ch, rate, montage, notes) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -258,7 +268,7 @@ class DBManager:
         return stats
 
     def fill_segments_from_dict(self, seg_dict: Dict, edf_file_path: str) -> Tuple[int, int]:
-        """ Fill database with segments from the segment dictionary. """
+        """Fill database with segments from the segment dictionary."""
         file_hash = self._calculate_file_hash(edf_file_path)
         if self.get_edf_file_by_hash(file_hash):
             raise ValueError("EDF file already exists in database")
@@ -278,45 +288,100 @@ class DBManager:
         else:
             sex = 'N'
         birthdate = subject_info.get('birthday')
-        recording_date = raw.get('meas_date')
-        age = None
-        if birthdate and recording_date:
-            if isinstance(birthdate, str):
-                birthdate = datetime.strptime(birthdate, '%Y-%m-%d')
-            age = recording_date.year - birthdate.year
-            if (recording_date.month, recording_date.day) < (birthdate.month, birthdate.day):
-                age -= 1
-        patient_id = self.add_patient(name, sex, age)
-        start_date = raw.get('meas_date', datetime.now()).timestamp()
+        if birthdate:
+            if hasattr(birthdate, 'strftime'):
+                birthdate = birthdate.strftime('%d.%m.%Y')
+            elif isinstance(birthdate, str):
+                try:
+                    try:
+                        dt = datetime.strptime(birthdate, '%Y-%m-%d')
+                        birthdate = dt.strftime('%d.%m.%Y')
+                    except ValueError:
+                        datetime.strptime(birthdate, '%d.%m.%Y')
+                except ValueError:
+                    birthdate = None
+        try:
+            patient_id = self.add_patient(name, sex, birthdate if birthdate else '01:01:1900')
+        except ValueError as e:
+            logging.error(f"Failed to add patient: {str(e)}")
+            raise
         eeg_ch = len([ch for ch in raw['ch_names'] if 'EEG' in ch])
         rate = raw['sfreq']
-        edf_id = self.add_edf_file(
-            patient_id=patient_id,
-            file_hash=file_hash,
-            start_date=start_date,
-            eeg_ch=eeg_ch,
-            rate=rate
-        )
+        start_date = raw.get('meas_date', datetime.now())
+        if isinstance(start_date, (float, int)):
+            start_date = datetime.fromtimestamp(start_date)
+        start_date_str = start_date.strftime('%d.%m.%Y %H:%M')
+        try:
+            edf_id = self.add_edf_file(
+                patient_id=patient_id,
+                file_hash=file_hash,
+                start_date=start_date_str,
+                eeg_ch=eeg_ch,
+                rate=rate
+            )
+        except ValueError as e:
+            logging.error(f"Failed to add EDF file: {str(e)}")
+            raise
         base_dir = os.path.join(
-	        self.segments_dir,
-	        os.path.splitext(os.path.basename(edf_file_path))[0]
+            self.segments_dir,
+            os.path.splitext(os.path.basename(edf_file_path))[0]
         )
         os.makedirs(base_dir, exist_ok=True)
         for seg_name, seg_data in seg_dict.items():
             clean_seg_name = "".join(c if c.isalnum() else "_" for c in seg_name)
             seg_fname = f"seg_{clean_seg_name}_eeg.fif"
             seg_fpath = os.path.join(base_dir, seg_fname)
-            seg_data['data'].save(seg_fpath, overwrite=True)
-            self.add_segment(
-                patient_id=patient_id,
-                edf_id=edf_id,
-                seg_fpath=seg_fpath,
-                start_time=seg_data['start_time'],
-                end_time=seg_data['end_time'],
-                l_marker=seg_data['current_event'],
-                r_marker=seg_data['next_event']
-            )
+            try:
+                seg_data['data'].save(seg_fpath, overwrite=True)
+                self.add_segment(
+                    patient_id=patient_id,
+                    edf_id=edf_id,
+                    seg_fpath=seg_fpath,
+                    start_time=seg_data['start_time'],
+                    end_time=seg_data['end_time'],
+                    l_marker=seg_data['current_event'],
+                    r_marker=seg_data['next_event']
+                )
+            except Exception as e:
+                logging.error(f"Failed to add segment {seg_name}: {str(e)}")
+                continue
+
         return patient_id, edf_id
+
+    @staticmethod
+    def parse_date(date_str: str) -> datetime:
+        """Parse date string in format 'ДД.ММ.ГГГГ ЧЧ:ММ' to datetime"""
+        return datetime.strptime(date_str, '%d.%m.%Y %H:%M')
+
+    @staticmethod
+    def format_date(dt: datetime) -> str:
+        """Format datetime to string in format 'ДД.ММ.ГГГГ ЧЧ:ММ'"""
+        return dt.strftime('%d.%m.%Y %H:%M')
+
+    @staticmethod
+    def validate_birthday(birthday: str) -> bool:
+        """Validate birthday format (ДД.ММ.ГГГГ)"""
+        try:
+            datetime.strptime(birthday, '%d.%m.%Y')
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def calculate_age(birthday: str) -> int:
+        """Calculate age from birthday (format: 'ДД.ММ.ГГГГ')"""
+        if not birthday:
+            return None
+        try:
+            birth_date = datetime.strptime(birthday, '%d.%m.%Y')  # Изменили формат
+        except ValueError:
+            return None
+
+        today = datetime.now()
+        age = today.year - birth_date.year
+        if (today.month, today.day) < (birth_date.month, birth_date.day):
+            age -= 1
+        return age
 
     def get_avg_segment_duration(self):
         """Get average duration of all segments in seconds"""
@@ -331,15 +396,27 @@ class DBManager:
         return dict(cursor.fetchall())
 
     def get_age_statistics(self):
-        """Get age statistics (avg, min, max)"""
+        """Get age statistics (avg, min, max) calculated from birthday"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT AVG(age), MIN(age), MAX(age) FROM patients")
-        avg, min_age, max_age = cursor.fetchone()
-        return {
-            'avg': avg or 0,
-            'min': min_age or 0,
-            'max': max_age or 0
-        }
+        try:
+            cursor.execute("""
+                SELECT 
+                    AVG((julianday('now') - julianday(birthday, '%d.%m.%Y')) / 365.25),
+                    MIN((julianday('now') - julianday(birthday, '%d.%m.%Y')) / 365.25),
+                    MAX((julianday('now') - julianday(birthday, '%d.%m.%Y')) / 365.25)
+                FROM patients
+                WHERE birthday IS NOT NULL
+            """)
+            result = cursor.fetchone()
+            if result and result[0] is not None:
+                return {
+                    'avg': result[0],
+                    'min': result[1],
+                    'max': result[2]
+                }
+        except Exception as e:
+            print(f"Error getting age stats: {e}")
+        return None
 
     def get_segment_duration_stats(self):
         """Get segment duration statistics (avg, min, max) by calculating duration as end_time - start_time"""
@@ -402,30 +479,24 @@ class DBManager:
         return None
 
     def get_age_statistics(self):
-        """Get age statistics (avg, min, max)"""
+        """Get age statistics (avg, min, max) calculated from birthday"""
         cursor = self.conn.cursor()
         try:
-            # Проверяем структуру таблицы patients
-            cursor.execute("PRAGMA table_info(patients)")
-            columns = [info[1] for info in cursor.fetchall()]
+            # Получаем все даты рождения и вычисляем возраст в Python
+            cursor.execute("SELECT birthday FROM patients WHERE birthday IS NOT NULL")
+            birthdays = [row[0] for row in cursor.fetchall()]
 
-            # Определяем имя столбца с возрастом
-            age_column = None
-            for col in columns:
-                if col.lower() in ['age', 'patient_age']:
-                    age_column = col
-                    break
+            ages = []
+            for bday in birthdays:
+                age = self.calculate_age(bday)
+                if age is not None:
+                    ages.append(age)
 
-            if not age_column:
-                return None
-
-            cursor.execute(f"SELECT AVG({age_column}), MIN({age_column}), MAX({age_column}) FROM patients")
-            result = cursor.fetchone()
-            if result and result[0] is not None:
+            if ages:
                 return {
-                    'avg': result[0],
-                    'min': result[1],
-                    'max': result[2]
+                    'avg': sum(ages) / len(ages),
+                    'min': min(ages),
+                    'max': max(ages)
                 }
         except Exception as e:
             print(f"Error getting age stats: {e}")
