@@ -1,6 +1,5 @@
 # core/edf_segmentor.py
 import mne
-from mne.viz import plot_montage
 from core.montage_manager import MontageManager
 from config.settings import settings
 import numpy as np

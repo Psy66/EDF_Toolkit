@@ -89,12 +89,12 @@ class DBManager:
         CREATE TABLE IF NOT EXISTS edf_files (
             edf_id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id INTEGER NOT NULL,
-            file_hash TEXT UNIQUE NOT NULL,
             start_date TEXT NOT NULL,
             eeg_ch INTEGER NOT NULL,
             rate REAL NOT NULL,
             montage TEXT DEFAULT '',
             notes TEXT DEFAULT '',
+            file_hash TEXT UNIQUE NOT NULL,
             FOREIGN KEY (patient_id) REFERENCES patients (patient_id)
         )
         """)
@@ -105,12 +105,12 @@ class DBManager:
             seg_id INTEGER PRIMARY KEY AUTOINCREMENT,
             patient_id INTEGER NOT NULL,
             edf_id INTEGER NOT NULL,
-            seg_fpath TEXT UNIQUE NOT NULL,
             start_time REAL NOT NULL,
             end_time REAL NOT NULL,
             l_marker TEXT NOT NULL,
             r_marker TEXT NOT NULL,
             notes TEXT DEFAULT '',
+            seg_fpath TEXT UNIQUE NOT NULL,
             FOREIGN KEY (patient_id) REFERENCES patients (patient_id),
             FOREIGN KEY (edf_id) REFERENCES edf_files (edf_id)
         )

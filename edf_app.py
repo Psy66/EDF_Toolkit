@@ -50,74 +50,146 @@ class EDFApp:
         self.button_frame.pack(pady=10)
         for i in range(12):
             self.button_frame.grid_columnconfigure(i, weight=1)
-        tk.Label(self.button_frame, text="Batch Processing:", font=("Arial", 11)) \
-            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        # Section 1: EDF Folder Processing
+        self._setup_edf_folder_processing_section()
+
+        # Section 2: EDF Segmentation
+        self._setup_edf_segmentation_section()
+
+        # Section 3: Database Management
+        self._setup_database_management_section()
+
+        # Text output area
+        self._setup_text_output_area()
+
+    def _setup_edf_folder_processing_section(self):
+        """Set up the EDF folder processing buttons section"""
+        tk.Label(self.button_frame, text="EDF Folder Processing:",
+                 font=("Arial", 11)).grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
         batch_buttons = [
             ("Open", self.select_directory, "Select folder with EDF files"),
             ("Rename", self.rename_files, "Rename EDF files by metadata"),
             ("Check", self.check_corrupted, "Check for corrupted files"),
             ("Dupes", self.find_duplicates, "Find and delete duplicates"),
             ("Similar", self.find_similar_time, "Find files with similar times"),
-            ("EDF Stats", self.generate_stats, "Generate statistics"),
+            ("Stats", self.generate_stats, "Generate statistics for EDF files"),
             ("Patients", self.generate_patient_table, "Create patient table"),
             ("Random", self.randomize_filenames, "Randomize filenames"),
             ("Anonym", self.remove_patient_info, "Remove patient info"),
-            ("Info", self.read_edf_info, "Show EDF file info"),
+            ("Info", self.read_edf_info, "Show first EDF file info"),
         ]
+
         for idx, (text, command, tooltip) in enumerate(batch_buttons):
-            btn = tk.Button(self.button_frame, text=text, width=8, command=command,
-                            state=tk.DISABLED if idx > 0 else tk.NORMAL)
+            btn = tk.Button(
+                self.button_frame,
+                text=text,
+                width=8,
+                command=command,
+                state=tk.DISABLED if idx > 0 else tk.NORMAL
+            )
             btn.grid(row=0, column=idx + 1, padx=2, pady=5, sticky="ew")
             self._create_tooltip(btn, tooltip)
-        tk.Label(self.button_frame, text="Segmentation:", font=("Arial", 11)) \
-            .grid(row=1, column=0, padx=5, pady=5, sticky="w")
+
+    def _setup_edf_segmentation_section(self):
+        """Set up the EDF segmentation section"""
+        tk.Label(self.button_frame, text="EDF Segmentation:",
+                 font=("Arial", 11)).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+
         seg_buttons = [
             ("Load", self.load_edf_file, "Load EDF file"),
-            ("Split", self.split_into_segments, "Split into segments"),
+            ("Split", self.split_into_segments, "Split EDF file into segments"),
         ]
+
         for idx, (text, command, tooltip) in enumerate(seg_buttons):
-            btn = tk.Button(self.button_frame, text=text, width=8, command=command, state=tk.DISABLED)
+            btn = tk.Button(
+                self.button_frame,
+                text=text,
+                width=8,
+                command=command,
+                state=tk.DISABLED
+            )
             btn.grid(row=1, column=idx + 1, padx=2, pady=5, sticky="ew")
             self._create_tooltip(btn, tooltip)
-        tk.Label(self.button_frame, text="Min (sec):", font=("Arial", 9)) \
-            .grid(row=1, column=3, padx=2, pady=5, sticky="e")
+
+        # Duration controls
+        tk.Label(self.button_frame, text="Min (sec):",
+                 font=("Arial", 9)).grid(row=1, column=3, padx=2, pady=5, sticky="e")
+
         self.min_duration_entry = tk.Entry(self.button_frame, width=6)
         self.min_duration_entry.insert(0, str(settings.MIN_SEGMENT_DURATION))
         self.min_duration_entry.grid(row=1, column=4, padx=2, pady=5, sticky="w")
-        tk.Button(self.button_frame, text="Set", width=4, command=self.apply_min_duration) \
-            .grid(row=1, column=5, padx=2, pady=5, sticky="w")
-        tk.Label(self.button_frame, text="Database:", font=("Arial", 11)) \
-            .grid(row=2, column=0, padx=5, pady=5, sticky="w")
+
+        tk.Button(
+            self.button_frame,
+            text="Set",
+            width=4,
+            command=self.apply_min_duration
+        ).grid(row=1, column=5, padx=2, pady=5, sticky="w")
+
+    def _setup_database_management_section(self):
+        """Set up the database management section"""
+        tk.Label(self.button_frame, text="Database Management:",
+                 font=("Arial", 11)).grid(row=2, column=0, padx=5, pady=5, sticky="w")
+
         db_buttons = [
-            ("Create", self.create_database, "Create new database"),
-            ("Fill", self.fill_segments, "Fill with segments"),
+            ("Create DB", self.create_database, "Create new database"),
+            ("Delete DB", self.delete_database, "Delete database"),
+            ("Fill DB", self.fill_segments, "Fill with segments from current EDF file"),
+            ("All S&F", self.batch_process_edf_files, "Process all EDF files and save segments to DB"),
             ("DB Stats", self.show_db_stats, "Show DB statistics"),
-            ("Editor", self.edit_database, "View/edit tables"),
+            ("DB Editor", self.edit_database, "View/edit tables")
         ]
+
         for idx, (text, command, tooltip) in enumerate(db_buttons):
-            btn = tk.Button(self.button_frame, text=text, width=8, command=command,
-                            state=tk.NORMAL if idx == 0 else tk.DISABLED)
+            btn = tk.Button(
+                self.button_frame,
+                text=text,
+                width=8,
+                command=command,
+                state=tk.NORMAL if idx == 0 else tk.DISABLED
+            )
             btn.grid(row=2, column=idx + 1, padx=2, pady=5, sticky="ew")
             self._create_tooltip(btn, tooltip)
-        self.db_status_label = tk.Label(self.button_frame, text="[DB Not Created]", fg="red")
-        self.db_status_label.grid(row=2, column=6, columnspan=4, padx=5, pady=5, sticky="w")
-        tk.Button(self.button_frame, text="Exit", width=8, command=self.root.quit) \
-            .grid(row=2, column=10, padx=2, pady=5, sticky="e")
-        self.text_output = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=210, height=40)
+
+            # Save reference to the batch process button
+            if text == "All S&F":
+                self.btn_batch_process = btn
+
+        self.db_status_label = tk.Label(
+            self.button_frame,
+            text="[DB Not Created]",
+            fg="red"
+        )
+        self.db_status_label.grid(row=2, column=7, columnspan=3, padx=5, pady=5, sticky="w")
+
+        # Exit button
+        tk.Button(
+            self.button_frame,
+            text="Exit",
+            width=8,
+            command=self.root.quit
+        ).grid(row=2, column=11, padx=2, pady=5, sticky="e")
+
+    def _setup_text_output_area(self):
+        """Set up the text output area with context menu"""
+        self.text_output = scrolledtext.ScrolledText(
+            self.root,
+            wrap=tk.WORD,
+            width=210,
+            height=40
+        )
         self.text_output.pack(pady=10)
+
+        # Bind keyboard shortcuts
         self.text_output.bind("<Control-c>", self._copy_text)
         self.text_output.bind("<Control-a>", self._select_all_text)
+
+        # Context menu setup
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Copy", command=self._copy_text)
         self.text_output.bind("<Button-3>", self._show_context_menu)
-        self.btn_batch_process = tk.Button(
-            self.button_frame,
-            text="All split & Fill",
-            command=self.batch_process_edf_files,
-            state=tk.DISABLED
-        )
-        self.btn_batch_process.grid(row=1, column=6, padx=2, pady=5, sticky="ew")
-        self._create_tooltip(self.btn_batch_process, "Process all EDF files in folder and save segments to DB")
 
     def batch_process_edf_files(self):
         """Process all EDF files in the directory and save segments to the database"""
@@ -127,50 +199,116 @@ class EDFApp:
         if not hasattr(self, 'db_manager') or not self.db_manager:
             messagebox.showwarning("Error", "Please create a database first")
             return
+
         edf_files = [f for f in os.listdir(self.directory) if f.lower().endswith('.edf')]
         if not edf_files:
             messagebox.showinfo("Information", "No EDF files found in the selected directory")
             return
+
+        # Create progress window
+        progress_window, progress_var, status_label = self._create_progress_window(len(edf_files))
         self.text_output.delete(1.0, tk.END)
         self.text_output.insert(tk.END, f"Starting batch processing of {len(edf_files)} files...\n")
+
         total_segments = 0
         processed_files = 0
-        for edf_file in edf_files:
-            try:
-                file_path = os.path.join(self.directory, edf_file)
-                self.text_output.insert(tk.END, f"\nProcessing file: {edf_file}\n")
-                self.text_output.update_idletasks()
-                segmentor = EDFSegmentor(self.text_output)
-                segmentor.load_metadata(file_path)
-                segmentor.process()
-                if segmentor.seg_dict:
-                    try:
-                        patient_id, edf_id = self.db_manager.fill_segments_from_dict(
-                            segmentor.seg_dict,
-                            file_path
-                        )
-                        segments_added = len(segmentor.seg_dict)
-                        total_segments += segments_added
-                        self.text_output.insert(
-                            tk.END,
-                            f"Added {segments_added} segments to DB (Patient ID: {patient_id}, EDF ID: {edf_id})\n"
-                        )
-                        processed_files += 1
-                    except ValueError as e:
-                        self.text_output.insert(tk.END, f"Database insertion error: {str(e)}\n")
-                else:
-                    self.text_output.insert(tk.END, "File contains no segments to add\n")
-            except Exception as e:
-                self.text_output.insert(tk.END, f"Error processing file {edf_file}: {str(e)}\n")
-                logging.error(f"Error processing {edf_file}: {e}")
-                continue
-        self.text_output.insert(
-            tk.END,
-            f"\nBatch processing completed!\n"
-            f"Files processed: {processed_files}/{len(edf_files)}\n"
-            f"Total segments added: {total_segments}\n"
+        self._cancel_processing = False
+
+        try:
+            for i, edf_file in enumerate(edf_files, 1):
+                if self._cancel_processing:
+                    self.text_output.insert(tk.END, "\nProcessing cancelled by user\n")
+                    break
+
+                try:
+                    # Update progress
+                    progress_var.set(i)
+                    status_label.config(text=f"Processing file {i} of {len(edf_files)}: {edf_file}")
+                    progress_window.update()
+
+                    file_path = os.path.join(self.directory, edf_file)
+                    self.text_output.insert(tk.END, f"\nProcessing file: {edf_file}\n")
+                    self.text_output.update_idletasks()
+
+                    # Process file
+                    segmentor = EDFSegmentor(self.text_output)
+                    segmentor.load_metadata(file_path)
+                    segmentor.process()
+
+                    if segmentor.seg_dict:
+                        try:
+                            patient_id, edf_id = self.db_manager.fill_segments_from_dict(
+                                segmentor.seg_dict,
+                                file_path
+                            )
+                            segments_added = len(segmentor.seg_dict)
+                            total_segments += segments_added
+                            self.text_output.insert(
+                                tk.END,
+                                f"Added {segments_added} segments to DB (Patient ID: {patient_id}, EDF ID: {edf_id})\n"
+                            )
+                            processed_files += 1
+                        except ValueError as e:
+                            self.text_output.insert(tk.END, f"Database insertion error: {str(e)}\n")
+                    else:
+                        self.text_output.insert(tk.END, "File contains no segments to add\n")
+
+                except Exception as e:
+                    self.text_output.insert(tk.END, f"Error processing file {edf_file}: {str(e)}\n")
+                    logging.error(f"Error processing {edf_file}: {e}")
+                    continue
+
+            completion_msg = "\nBatch processing cancelled\n" if self._cancel_processing else "\nBatch processing completed!\n"
+            self.text_output.insert(
+                tk.END,
+                f"{completion_msg}"
+                f"Files processed: {processed_files}/{len(edf_files)}\n"
+                f"Total segments added: {total_segments}\n"
+            )
+
+        finally:
+            progress_window.destroy()
+            self._update_db_status()
+
+    def _create_progress_window(self, total_files):
+        """Create and configure progress window"""
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Batch Processing Progress")
+        progress_window.geometry("400x150")
+        progress_window.resizable(False, False)
+        progress_window.grab_set()  # Make window modal
+
+        tk.Label(progress_window, text="Processing EDF files...", font=('Arial', 10)).pack(pady=10)
+
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(
+            progress_window,
+            variable=progress_var,
+            maximum=total_files,
+            length=300,
+            mode='determinate'
         )
-        self._update_db_status()
+        progress_bar.pack(pady=5)
+
+        status_label = tk.Label(progress_window, text=f"0 of {total_files} files processed")
+        status_label.pack(pady=5)
+
+        cancel_button = tk.Button(
+            progress_window,
+            text="Cancel",
+            command=lambda: setattr(self, '_cancel_processing', True)
+        )
+        cancel_button.pack(pady=5)
+
+        self._center_window(progress_window)
+        return progress_window, progress_var, status_label
+
+    def _center_window(self, window):
+        """Center window relative to main window"""
+        window.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - window.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - window.winfo_height()) // 2
+        window.geometry(f"+{x}+{y}")
 
     def _copy_table_data(self, tree):
         """Copy selected table data to clipboard"""
@@ -320,19 +458,6 @@ class EDFApp:
                 messagebox.showinfo("Success", f"Data exported to:\n{file_path}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export data:\n{str(e)}")
-
-    def edit_database(self):
-        """Open database editor window."""
-        if not self.db_manager:
-            messagebox.showwarning("Error", "Database not created. Please create database first.")
-            return
-        editor = tk.Toplevel(self.root)
-        editor.title("Database Editor")
-        editor.geometry("1200x600")
-        notebook = ttk.Notebook(editor)
-        self._create_table_viewer_tab(notebook)
-        self._create_sql_editor_tab(notebook)
-        notebook.pack(fill="both", expand=True)
 
     def _load_table_data(self, event):
         """Load selected table data"""
@@ -524,6 +649,84 @@ class EDFApp:
             messagebox.showerror("Database Error", error_msg)
             if hasattr(self, 'db_manager'):
                 del self.db_manager
+
+    def delete_database(self):
+        """Delete the current database after confirmation."""
+        if not hasattr(self, 'db_manager') or not self.db_manager:
+            messagebox.showwarning("Error", "No database to delete")
+            return
+        db_path = self.db_manager.db_path
+        db_name = os.path.basename(db_path)
+        confirm = messagebox.askyesno(
+            "Confirm Deletion",
+            f"Are you sure you want to delete database:\n{db_name}?\n\nThis action cannot be undone!",
+            icon='warning'
+        )
+        if not confirm:
+            return
+        try:
+            if hasattr(self.db_manager, 'close_connection'):
+                self.db_manager.close_connection()
+            else:
+                if self.db_manager.conn:
+                    self.db_manager.conn.close()
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            segments_dir = os.path.join(os.path.dirname(db_path), "segments")
+            if os.path.exists(segments_dir):
+                import shutil
+                shutil.rmtree(segments_dir)
+            self.db_manager = None
+            self.db_status_label.config(
+                text="[DB Not Created]",
+                fg="red",
+                font=("Arial", 9)
+            )
+            self._disable_db_buttons()
+            self.text_output.insert(tk.END, f"Database '{db_name}' successfully deleted\n")
+        except Exception as e:
+            error_msg = f"Error deleting database: {str(e)}"
+            self.text_output.insert(tk.END, error_msg + "\n")
+            messagebox.showerror("Error", error_msg)
+            if os.path.exists(db_path):
+                try:
+                    self.db_manager = DBManager(os.path.dirname(os.path.dirname(db_path)))
+                    self._update_db_status()
+                except Exception:
+                    pass
+
+    def edit_database(self):
+        """Open database editor window."""
+        if not self.db_manager:
+            messagebox.showwarning("Error", "Database not created. Please create database first.")
+            return
+        editor = tk.Toplevel(self.root)
+        editor.title("Database Editor")
+        editor.geometry("1600x600")
+        notebook = ttk.Notebook(editor)
+        self._create_table_viewer_tab(notebook)
+        self._create_sql_editor_tab(notebook)
+        notebook.pack(fill="both", expand=True)
+
+    def _enable_all_db_buttons(self):
+        """Enable all database-related buttons after DB creation."""
+        if not hasattr(self, 'db_manager') or not self.db_manager:
+            return
+        db_button_texts = ["Delete DB", "Fill DB", "All S&F", "DB Stats", "DB Editor"]
+        for btn in self.button_frame.winfo_children():
+            if isinstance(btn, tk.Button) and btn["text"] in db_button_texts:
+                btn.config(state=tk.NORMAL)
+        if not (hasattr(self, 'segmentor') and self.segmentor and hasattr(self.segmentor, 'current_file_path')):
+            for btn in self.button_frame.winfo_children():
+                if isinstance(btn, tk.Button) and btn["text"] == "Fill DB":
+                    btn.config(state=tk.DISABLED)
+
+    def _disable_db_buttons(self):
+        """Disable all database-related buttons except Create."""
+        db_buttons = ["Fill", "DB Stats", "Editor", "Delete DB"]
+        for btn in self.button_frame.winfo_children():
+            if isinstance(btn, tk.Button) and btn["text"] in db_buttons:
+                btn.config(state=tk.DISABLED)
 
     def _enable_db_buttons(self):
         """Enable database buttons."""
