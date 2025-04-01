@@ -13,8 +13,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 class Patient:
     patient_id: int
     name: str
-    sex: str
-    birthday: str  # Формат 'ДД.ММ.ГГГГ'
+    gender: str
+    birthday: str
     note: str = ""
 
 @dataclass
@@ -22,7 +22,7 @@ class EDFFile:
     edf_id: int
     patient_id: int
     file_hash: str
-    start_date: str  # Формат 'ДД.ММ.ГГГГ ЧЧ:ММ'
+    start_date: str
     eeg_ch: int
     rate: float
     montage: str = ""
@@ -44,7 +44,7 @@ class Segment:
 class Diagnosis:
     patient_id: int
     ds_code: str
-    clinical_data: str
+    ds_descript: str
     notes: str = ""
 
 class DBManager:
@@ -52,7 +52,7 @@ class DBManager:
     def __init__(self, directory: str = ""):
         """Initialize the database manager."""
         self.directory = os.path.join(directory, "DB") if directory else "DB"
-        os.makedirs(self.directory, exist_ok=True)  # Создаем папку если не существует
+        os.makedirs(self.directory, exist_ok=True)
         self.db_path = os.path.join(self.directory, "eeg_database.db")
         self.segments_dir = os.path.join(self.directory, "segments")
         os.makedirs(self.segments_dir, exist_ok=True)
@@ -78,7 +78,7 @@ class DBManager:
         CREATE TABLE IF NOT EXISTS patients (
             patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            sex TEXT CHECK(sex IN ('M', 'F', 'N')) DEFAULT 'N',
+            gender TEXT CHECK(gender IN ('M', 'F', 'N')) DEFAULT 'N',
             birthday TEXT,
             note TEXT DEFAULT ''
         )
@@ -139,6 +139,14 @@ class DBManager:
         """Get the size of the database in bytes."""
         return os.path.getsize(self.db_path)
 
+    def get_table_names(self):
+        """Возвращает список всех таблиц в базе данных."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = [table[0] for table in cursor.fetchall()]
+        cursor.close()
+        return tables
+
     def get_table_data(self, table_name: str) -> List[Tuple]:
         """Get all data from a table."""
         cursor = self.conn.cursor()
@@ -155,20 +163,22 @@ class DBManager:
         """Check if database file exists."""
         return os.path.exists(self.db_path)
 
-    def add_patient(self, name: str, sex: str, birthday: str, note: str = "") -> int:
+    def add_patient(self, name: str, gender: str, birthday: str, note: str = "") -> int:
         """Add a new patient to the database or return existing patient_id if patient already exists."""
         try:
-            datetime.strptime(birthday, '%d.%m.%Y')  # Изменили формат на точки
+            datetime.strptime(birthday, '%d.%m.%Y')
         except ValueError:
             raise ValueError("Invalid birthday format. Expected 'ДД.ММ.ГГГГ'")
+
         cursor = self.conn.cursor()
         cursor.execute("SELECT patient_id FROM patients WHERE name = ?", (name,))
         result = cursor.fetchone()
         if result:
             return result[0]
+
         cursor.execute(
-            "INSERT INTO patients (name, sex, birthday, note) VALUES (?, ?, ?, ?)",
-            (name, sex, birthday, note)
+            "INSERT INTO patients (name, gender, birthday, note) VALUES (?, ?, ?, ?)",
+            (name, gender, birthday, note)
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -179,7 +189,7 @@ class DBManager:
         cursor.execute(f"SELECT * FROM {table_name}")
         return cursor.fetchall()
 
-    def add_edf_file(self, patient_id: int, file_hash: str, start_date: str,  # Изменяем тип на str
+    def add_edf_file(self, patient_id: int, file_hash: str, start_date: str,
                      eeg_ch: int, rate: float, montage: str = "", notes: str = "") -> int:
         """Add a new EDF file to the database."""
         cursor = self.conn.cursor()
@@ -280,13 +290,13 @@ class DBManager:
             subject_info.get('middle_name', ''),
             subject_info.get('last_name', '')
         ]).strip()
-        sex = subject_info.get('sex', 'N')
-        if sex == 1:
-            sex = 'M'
-        elif sex == 2:
-            sex = 'F'
+        gender = subject_info.get('sex', 'N')
+        if gender == 1:
+            gender = 'M'
+        elif gender == 2:
+            gender = 'F'
         else:
-            sex = 'N'
+            gender = 'N'
         birthdate = subject_info.get('birthday')
         if birthdate:
             if hasattr(birthdate, 'strftime'):
@@ -301,7 +311,7 @@ class DBManager:
                 except ValueError:
                     birthdate = None
         try:
-            patient_id = self.add_patient(name, sex, birthdate if birthdate else '01:01:1900')
+            patient_id = self.add_patient(name, gender, birthdate if birthdate else '01.01.1900')
         except ValueError as e:
             logging.error(f"Failed to add patient: {str(e)}")
             raise
@@ -368,14 +378,23 @@ class DBManager:
             return False
 
     @staticmethod
-    def calculate_age(birthday: str) -> int:
-        """Calculate age from birthday (format: 'ДД.ММ.ГГГГ')"""
+    def calculate_age(birthday: str, default_age: int = 0) -> int:
+        """Calculate age from birthday (format: 'ДД.ММ.ГГГГ')
+
+        Args:
+            birthday: Дата рождения в формате 'ДД.ММ.ГГГГ'
+            default_age: Значение, возвращаемое при ошибке (по умолчанию 0)
+
+        Returns:
+            Возраст в годах или default_age, если дата некорректна
+        """
         if not birthday:
-            return None
+            return default_age
+
         try:
-            birth_date = datetime.strptime(birthday, '%d.%m.%Y')  # Изменили формат
+            birth_date = datetime.strptime(birthday, '%d.%m.%Y')
         except ValueError:
-            return None
+            return default_age
 
         today = datetime.now()
         age = today.year - birth_date.year
@@ -422,12 +441,10 @@ class DBManager:
         """Get segment duration statistics (avg, min, max) by calculating duration as end_time - start_time"""
         cursor = self.conn.cursor()
         try:
-            # Проверяем наличие необходимых столбцов
             cursor.execute("PRAGMA table_info(segments)")
             columns = [info[1] for info in cursor.fetchall()]
 
             if 'start_time' in columns and 'end_time' in columns:
-                # Вычисляем статистику по продолжительности сегментов
                 cursor.execute("""
                     SELECT 
                         AVG(end_time - start_time) as avg_duration,
@@ -437,7 +454,6 @@ class DBManager:
                     WHERE end_time > start_time  -- Исключаем некорректные записи
                 """)
                 result = cursor.fetchone()
-
                 if result and result[0] is not None:
                     return {
                         'avg': result[0],
@@ -452,54 +468,6 @@ class DBManager:
         except Exception as e:
             logging.error(f"Error calculating segment duration stats: {str(e)}")
 
-        return None
-
-    def get_gender_distribution(self):
-        """Get gender distribution statistics"""
-        cursor = self.conn.cursor()
-        try:
-            # Проверяем структуру таблицы patients
-            cursor.execute("PRAGMA table_info(patients)")
-            columns = [info[1] for info in cursor.fetchall()]
-
-            # Определяем имя столбца с полом
-            gender_column = None
-            for col in columns:
-                if col.lower() in ['gender', 'sex']:
-                    gender_column = col
-                    break
-
-            if not gender_column:
-                return None
-
-            cursor.execute(f"SELECT {gender_column}, COUNT(*) FROM patients GROUP BY {gender_column}")
-            return dict(cursor.fetchall())
-        except Exception as e:
-            print(f"Error getting gender distribution: {e}")
-        return None
-
-    def get_age_statistics(self):
-        """Get age statistics (avg, min, max) calculated from birthday"""
-        cursor = self.conn.cursor()
-        try:
-            # Получаем все даты рождения и вычисляем возраст в Python
-            cursor.execute("SELECT birthday FROM patients WHERE birthday IS NOT NULL")
-            birthdays = [row[0] for row in cursor.fetchall()]
-
-            ages = []
-            for bday in birthdays:
-                age = self.calculate_age(bday)
-                if age is not None:
-                    ages.append(age)
-
-            if ages:
-                return {
-                    'avg': sum(ages) / len(ages),
-                    'min': min(ages),
-                    'max': max(ages)
-                }
-        except Exception as e:
-            print(f"Error getting age stats: {e}")
         return None
 
     @staticmethod

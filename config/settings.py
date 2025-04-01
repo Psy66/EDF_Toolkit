@@ -1,7 +1,10 @@
 # config/settings.py
+from typing import Final
+
 class Settings:
-    """Класс для хранения настроек приложения."""
-    TABLE_FORMAT = "pretty"
-    MIN_SEGMENT_DURATION = 5.0
+    """Clss for storing application settings."""
+    TABLE_FORMAT: Final[str] = "pretty"
+    MIN_SEGMENT_DURATION: Final[float] = 5.0
+    MAX_WORKERS: Final[int] = 4
 
 settings = Settings()

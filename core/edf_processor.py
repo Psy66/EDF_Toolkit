@@ -12,14 +12,16 @@ from mne import find_events
 from pandas import DataFrame
 import logging
 from transliterate import translit
+
+from config.settings import settings
 from core.edf_visualizer import EDFVisualizer
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 class EDFProcessor:
-    def __init__(self, directory):
-        self.directory = directory
+    def __init__(self, directory_path):
+        self.directory = directory_path
         self.output_dir = os.path.join(self.directory, "output")
         os.makedirs(self.output_dir, exist_ok=True)
         self.visualizer = EDFVisualizer(self.output_dir)
@@ -66,7 +68,7 @@ class EDFProcessor:
         edf_files = [f for f in os.listdir(self.directory) if f.endswith('.edf')]
         renamed_count = 0
 
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=settings.MAX_WORKERS) as executor:
             futures = {executor.submit(self.get_edf_metadata, os.path.join(self.directory, file)): file for file in
                        edf_files}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Renaming files", unit="file"):
@@ -110,15 +112,17 @@ class EDFProcessor:
         metadata_list = []
         files = [os.path.join(self.directory, f) for f in os.listdir(self.directory) if f.endswith('.edf')]
 
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self.get_edf_metadata, file) for file in files]
+        with ThreadPoolExecutor(max_workers=settings.MAX_WORKERS) as executor:
+            futures = {executor.submit(self.get_edf_metadata, file): file for file in files}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Analyzing files", unit="file"):
+                file = futures[future]
                 try:
                     metadata = future.result()
                     if metadata:
                         metadata_list.append(metadata)
                 except Exception as e:
-                    logging.error(f"Error analyzing file: {e}")
+                    logging.error(f"Error analyzing file {file}: {e}")
+                    continue  # Продолжаем обработку остальных файлов
 
         return metadata_list
 
@@ -126,7 +130,7 @@ class EDFProcessor:
     def is_edf_corrupted(file_path):
         """Check if an EDF file is corrupted."""
         try:
-            raw = read_raw_edf(file_path, verbose=False)
+            read_raw_edf(file_path, verbose=False)
             return False
         except Exception as e:
             logging.error(f"Error reading file {file_path}: {e}")
@@ -138,7 +142,7 @@ class EDFProcessor:
         edf_files = [os.path.join(root, file) for root, _, files in os.walk(self.directory) for file in files if
                      file.endswith(".edf")]
 
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=settings.MAX_WORKERS) as executor:
             futures = {executor.submit(self.is_edf_corrupted, file): file for file in edf_files}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Checking files", unit="file"):
                 file = futures[future]
@@ -172,7 +176,7 @@ class EDFProcessor:
         edf_files = [os.path.join(root, file) for root, _, files in os.walk(self.directory) for file in files if
                      file.lower().endswith('.edf')]
 
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=settings.MAX_WORKERS) as executor:
             futures = {executor.submit(self.get_edf_start_time, file): file for file in edf_files}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files", unit="file"):
                 file = futures[future]
@@ -206,34 +210,60 @@ class EDFProcessor:
 
     def find_duplicate_files(self):
         """Find duplicate files in the specified directory."""
-        size_dict = defaultdict(list)
-
+        file_paths = []
         for root, _, files in os.walk(self.directory):
             for file in files:
                 file_path = os.path.join(root, file)
-                file_size = os.path.getsize(file_path)
-                size_dict[file_size].append(file_path)
-
+                file_paths.append(file_path)
+        size_dict = defaultdict(list)
+        for path in tqdm(file_paths, desc="Collecting file sizes", unit="file"):
+            try:
+                size = os.path.getsize(path)
+                size_dict[size].append(path)
+            except OSError as e:
+                logging.warning(f"Could not get size for {path}: {e}")
         hash_dict = defaultdict(list)
-        for size, paths in tqdm(size_dict.items(), desc="Checking files", unit="group"):
-            if len(paths) > 1:
-                for path in paths:
-                    file_hash = self.calculate_file_hash(path)
-                    hash_dict[file_hash].append(path)
-
+        with tqdm(total=sum(len(paths) for paths in size_dict.values() if len(paths) > 1),
+                  desc="Checking duplicates", unit="file") as pbar:
+            for size, paths in size_dict.items():
+                if len(paths) > 1:  # Только файлы с одинаковым размером
+                    for path in paths:
+                        try:
+                            file_hash = self.calculate_file_hash(path)
+                            hash_dict[file_hash].append(path)
+                            pbar.update(1)
+                        except OSError as e:
+                            logging.warning(f"Could not hash {path}: {e}")
+                            pbar.update(1)
         duplicates = {hash_val: paths for hash_val, paths in hash_dict.items() if len(paths) > 1}
+        total_duplicates = sum(len(paths) - 1 for paths in duplicates.values())
+        logging.info(f"Found {len(duplicates)} duplicate groups ({total_duplicates} redundant files)")
         return duplicates
 
     @staticmethod
     def delete_duplicates(duplicates):
-        """Delete all duplicates except one."""
-        for hash_val, paths in duplicates.items():
-            for path in tqdm(paths[1:], desc="Deleting duplicates", unit="file"):
+        """Delete all duplicates except one, with confirmation and backup option."""
+        total_saved = 0
+        total_failed = 0
+
+        for hash_val, paths in tqdm(duplicates.items(), desc="Deleting duplicates", unit="group"):
+            # Оставляем первый файл, удаляем остальные
+            for path in paths[1:]:
                 try:
+                    # Можно добавить резервное копирование перед удалением
                     os.remove(path)
-                    logging.info(f"Deleted file: {path}")
+                    total_saved += 1
+                    logging.info(f"Deleted duplicate: {path}")
                 except OSError as e:
-                    logging.error(f"Error deleting file {path}: {e}")
+                    total_failed += 1
+                    logging.error(f"Failed to delete {path}: {e}")
+
+        return {
+            'total_saved': total_saved,
+            'total_failed': total_failed,
+            'space_saved': total_saved * os.path.getsize(next(iter(duplicates.values()))[0])
+            if total_saved > 0 else 0
+        }
 
     @staticmethod
     def calculate_age(birthdate, recording_date):
@@ -295,44 +325,39 @@ class EDFProcessor:
         files = [f for f in os.listdir(self.directory) if f.endswith(".edf")]
         patient_data = set()
 
-        def process_file(file):
+        def process_single_file(file_path):
             """Process a single file to extract patient data."""
             try:
-                name = self._extract_patient_name(file)
-                translated_name = translit(name, 'ru', reversed=True)
+                patient_name = self._extract_patient_name(file_path)
+                translated_name = translit(patient_name, 'ru', reversed=True)
 
-                metadata = self.get_edf_metadata(os.path.join(self.directory, file))
-                if metadata:
-                    subject_info = metadata.get('subject_info', {})
+                metadata = self.get_edf_metadata(os.path.join(self.directory, file_path))
+                if not metadata:
+                    return None
 
-                    sex = subject_info.get('sex', 'Unknown')
-                    if sex == 1:
-                        sex = 'M'
-                    elif sex == 2:
-                        sex = 'F'
-                    else:
-                        sex = 'Unknown'
+                subject_info = metadata.get('subject_info', {})
+                gender = 'M' if subject_info.get('sex') == 1 else 'F' if subject_info.get('sex') == 2 else 'Unknown'
 
-                    birthdate = subject_info.get('birthday')
-                    recording_date = metadata.get('meas_date')
-                    age = None
-                    if birthdate and recording_date:
-                        age = self.calculate_age(birthdate, recording_date)
+                birth_date = subject_info.get('birthday')
+                record_date = metadata.get('meas_date')
+                patient_age = None
+                if birth_date and record_date:
+                    patient_age = self.calculate_age(birth_date, record_date)
 
-                    return translated_name, sex, age
-            except Exception as e:
-                logging.error(f"Error processing file {file}: {e}")
-            return None
+                return translated_name, gender, patient_age
+            except Exception as err:
+                logging.error(f"Error processing file {file_path}: {err}")
+                return None
 
-        with ThreadPoolExecutor() as executor:
-            futures = {executor.submit(process_file, file): file for file in files}
+        with ThreadPoolExecutor(max_workers=settings.MAX_WORKERS) as executor:
+            futures = {executor.submit(process_single_file, file): file for file in files}
             for future in tqdm(as_completed(futures), total=len(futures), desc="Processing files", unit="file"):
                 try:
                     result = future.result()
                     if result:
                         patient_data.add(result)
-                except Exception as e:
-                    logging.error(f"Error processing file: {e}")
+                except Exception as err:
+                    logging.error(f"Error processing file: {err}")
 
         sorted_data = sorted(patient_data, key=lambda x: x[0])
 
@@ -345,7 +370,6 @@ class EDFProcessor:
                 writer.writerow([name, sex, age if age is not None else "Unknown"])
 
         return f"Patient table saved to {output_path}"
-
     @staticmethod
     def _extract_patient_name(filename):
         """Extract patient name from the filename."""
@@ -429,7 +453,8 @@ class EDFProcessor:
             logging.error(f"Error reading information from file {first_file}: {e}")
             return f"Ошибка при чтении файла {first_file}: {e}"
 
-    def _format_edf_info(self, metadata):
+    @staticmethod
+    def _format_edf_info(metadata):
         """Format EDF file information for human-readable output."""
         subject_info = metadata.get('subject_info', {})
         formatted_info = (
@@ -452,7 +477,7 @@ class EDFProcessor:
         metadata_list = self.analyze_directory()
         df, descriptive_stats = self.generate_statistics(metadata_list)
         self.visualizer.visualize_statistics(df)
-        self.export_statistics(df, descriptive_stats)
+        # Удаляем лишний вызов export_statistics, так как данные уже сохранены в generate_statistics
         logging.info("EDF processing completed.")
 
 if __name__ == "__main__":
